@@ -88,8 +88,23 @@ class BrainClient {
 
     // ====================== SEND DATA ======================
 
+    /**
+     * Send video frame to the brain.
+     * 
+     * IMPORTANT: Only send 32x32 RGBA frames!
+     * - Buffer length must be exactly 4096 bytes (32 * 32 * 4).
+     * - Format: RGBA (4 bytes per pixel, no padding).
+     * 
+     * @param {Buffer|Uint8Array} rgbaBuffer - Raw RGBA pixel data (32x32 only)
+     */
     sendVideo(rgbaBuffer) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+        if (rgbaBuffer.length !== 4096) {
+            console.warn(`[BrainClient] WARNING: sendVideo received ${rgbaBuffer.length} bytes. ` +
+                `Only 32x32 RGBA frames (4096 bytes) are supported.`);
+        }
+
         const header = Buffer.from('VIDE');
         this.ws.send(Buffer.concat([header, Buffer.from(rgbaBuffer)]));
     }
