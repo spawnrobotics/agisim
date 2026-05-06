@@ -1,7 +1,5 @@
 // brain-client.js
 const WebSocket = require('ws');
-const fs = require('fs');
-const path = require('path');
 
 class BrainClient {
     constructor(apiKey, options = {}) {
@@ -116,6 +114,9 @@ class BrainClient {
         this.ws.send(Buffer.concat([header, audioBuf]));
     }
 
+    /**
+     * General sensor / data stimulus (uses IMUS header)
+     */
     sendStimulus(type, data = {}) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
@@ -127,6 +128,46 @@ class BrainClient {
 
         const header = Buffer.from('IMUS');
         const jsonBuf = Buffer.from(JSON.stringify(payload));
+        this.ws.send(Buffer.concat([header, jsonBuf]));
+    }
+
+    /**
+     * Dedicated Text Stimulus (uses TEXT header)
+     */
+    sendText(text, extra = {}) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+        const payload = {
+            type: 'text',
+            content: text,
+            timestamp: Date.now(),
+            ...extra
+        };
+
+        const header = Buffer.from('TEXT');
+        const jsonBuf = Buffer.from(JSON.stringify(payload));
+
+        this.ws.send(Buffer.concat([header, jsonBuf]));
+
+        const short = text.length > 70 ? text.substring(0, 67) + '...' : text;
+        console.log(`[Client] Sent text: "${short}"`);
+    }
+
+    /**
+     * Advanced: Send stimulus with custom 4-character header
+     */
+    sendStimulusWithHeader(headerStr, type, data = {}) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+        const payload = {
+            type: type.toLowerCase(),
+            timestamp: Date.now(),
+            ...data
+        };
+
+        const header = Buffer.from(headerStr.toUpperCase().substring(0, 4).padEnd(4, ' '));
+        const jsonBuf = Buffer.from(JSON.stringify(payload));
+
         this.ws.send(Buffer.concat([header, jsonBuf]));
     }
 
