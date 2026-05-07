@@ -11,7 +11,6 @@ class BrainClient {
 
         this.agentId = this.apiKey;
         this.ws = null;
-        this.reconnectInterval = null;
         this.isConnected = false;
 
         this.options = {
@@ -19,6 +18,9 @@ class BrainClient {
             reconnectDelay: 3000,
             ...options
         };
+
+        // Client-side rate tracking to help respect server throttling
+        this.lastGenericSendTime = new Map();
 
         this.onConnect = null;
         this.onDisconnect = null;
@@ -38,9 +40,16 @@ class BrainClient {
             this.isConnected = true;
             console.log(`[BrainClient] ✅ Connected successfully`);
 
+            // Send join with recommended generic throttling config
             this.ws.send(JSON.stringify({
                 type: 'join',
-                agentId: this.agentId
+                agentId: this.agentId,
+                genericConfig: {
+                    imus: 5,      // Allow up to ~200 Hz IMU
+                    text: 50,     // Text thoughts
+                    stat: 1000,   // Status updates
+                    sens: 20      // Generic sensors
+                }
             }));
 
             if (this.onConnect) this.onConnect();
@@ -92,26 +101,26 @@ class BrainClient {
      * IMPORTANT: Only send 32x32 RGBA frames!
      * - Buffer length must be exactly 4096 bytes (32 * 32 * 4).
      * - Format: RGBA (4 bytes per pixel, no padding).
-     * 
-     * @param {Buffer|Uint8Array} rgbaBuffer - Raw RGBA pixel data (32x32 only)
      */
     sendVideo(rgbaBuffer) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
         if (rgbaBuffer.length !== 4096) {
-            console.warn(`[BrainClient] WARNING: sendVideo received ${rgbaBuffer.length} bytes. ` +
-                `Only 32x32 RGBA frames (4096 bytes) are supported.`);
+            console.warn(`[BrainClient ⚠️] sendVideo: Expected 4096 bytes, got ${rgbaBuffer.length}`);
         }
 
         const header = Buffer.from('VIDE');
         this.ws.send(Buffer.concat([header, Buffer.from(rgbaBuffer)]));
+        console.log(`[Client 📤] sendVideo | 4096 bytes`);
     }
 
     sendAudio(float32Array) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
         const header = Buffer.from('AUIO');
         const audioBuf = Buffer.from(float32Array.buffer);
         this.ws.send(Buffer.concat([header, audioBuf]));
+        console.log(`[Client 📤] sendAudio | ${audioBuf.length} bytes`);
     }
 
     /**
@@ -120,14 +129,29 @@ class BrainClient {
     sendStimulus(type, data = {}) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
+        const now = Date.now();
+        const last = this.lastGenericSendTime.get(type) || 0;
+
+        // Light client-side warning if sending too fast
+        if (now - last < 5) {
+            console.warn(`[Client ⚠️] Sending "${type}" very frequently - server may throttle`);
+        }
+
+        this.lastGenericSendTime.set(type, now);
+
         const payload = {
             type: type.toLowerCase(),
-            timestamp: Date.now(),
+            timestamp: now,
             ...data
         };
 
         const header = Buffer.from('IMUS');
         const jsonBuf = Buffer.from(JSON.stringify(payload));
+        const totalSize = header.length + jsonBuf.length;
+
+        const inferFlag = data.infer ? ' (infer)' : '';
+        console.log(`[Client 📤] sendStimulus('${type}') | ${totalSize} bytes${inferFlag}`);
+
         this.ws.send(Buffer.concat([header, jsonBuf]));
     }
 
@@ -146,11 +170,15 @@ class BrainClient {
 
         const header = Buffer.from('TEXT');
         const jsonBuf = Buffer.from(JSON.stringify(payload));
+        const totalSize = header.length + jsonBuf.length;
 
-        this.ws.send(Buffer.concat([header, jsonBuf]));
+        const inferFlag = extra.infer ? ' (infer)' : '';
+        console.log(`[Client 📤] sendText() | ${totalSize} bytes${inferFlag}`);
 
         const short = text.length > 70 ? text.substring(0, 67) + '...' : text;
         console.log(`[Client] Sent text: "${short}"`);
+
+        this.ws.send(Buffer.concat([header, jsonBuf]));
     }
 
     /**
@@ -159,14 +187,20 @@ class BrainClient {
     sendStimulusWithHeader(headerStr, type, data = {}) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
+        const now = Date.now();
+        this.lastGenericSendTime.set(type, now);
+
         const payload = {
             type: type.toLowerCase(),
-            timestamp: Date.now(),
+            timestamp: now,
             ...data
         };
 
         const header = Buffer.from(headerStr.toUpperCase().substring(0, 4).padEnd(4, ' '));
         const jsonBuf = Buffer.from(JSON.stringify(payload));
+        const totalSize = header.length + jsonBuf.length;
+
+        console.log(`[Client 📤] sendStimulusWithHeader('${headerStr}', '${type}') | ${totalSize} bytes`);
 
         this.ws.send(Buffer.concat([header, jsonBuf]));
     }

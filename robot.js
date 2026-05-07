@@ -1,21 +1,21 @@
+// your-main-client.js
 const BrainClient = require('brain-client');
 
 const client = new BrainClient(process.env.BRAIN_API_KEY || 'your-api-key-here');
 
 let inferenceCounter = 0;
 let textThoughtCounter = 0;
+let genericSendCounter = 0;
 
 // ====================== CONNECTION ======================
 client.onConnect = () => {
     console.log('🤖 Connected to Cortex Brain');
 
-    // Initial status
     client.sendStimulus('status', {
         state: 'online',
         platform: 'raspberry-pi-5'
     });
 
-    // Initial greetings
     setTimeout(() => client.sendText("I am now connected and aware."), 800);
     setTimeout(() => client.sendText("Beginning continuous environmental monitoring."), 1500);
 };
@@ -32,8 +32,9 @@ client.onAudio = (audioData) => {
 // ====================== IMU STREAM + INFERENCE ======================
 setInterval(() => {
     inferenceCounter++;
+    genericSendCounter++;
 
-    const shouldInfer = (inferenceCounter % 8 === 0); // Every 8th IMU (~16 seconds)
+    const shouldInfer = (inferenceCounter % 8 === 0); // Forces brain to quickly output associations
 
     client.sendStimulus('imu', {
         accel: [
@@ -51,13 +52,14 @@ setInterval(() => {
     });
 
     if (shouldInfer) {
-        console.log(`[Client] ⚡ IMU sent with INFERENCE trigger (#${inferenceCounter})`);
+        console.log(`[Client] ⚡ IMU sent with inference trigger (#${inferenceCounter})`);
     }
 }, 2000);
 
 // ====================== PERIODIC TEXT THOUGHTS ======================
 setInterval(() => {
     textThoughtCounter++;
+    genericSendCounter++;
 
     const thoughts = [
         "The room feels calm.",
@@ -72,7 +74,7 @@ setInterval(() => {
     const thought = thoughts[Math.floor(Math.random() * thoughts.length)];
 
     client.sendText(thought, {
-        infer: Math.random() < 0.28   // ~28% chance to trigger inference
+        infer: Math.random() < 0.28
     });
 }, 10000);
 
@@ -82,18 +84,17 @@ setInterval(() => {
         state: 'active',
         uptime: Math.floor(process.uptime()),
         inferenceCount: inferenceCounter,
-        textThoughtsSent: textThoughtCounter
+        textThoughtsSent: textThoughtCounter,
+        totalGenericSent: genericSendCounter
     });
 }, 30000);
 
-// ====================== MANUAL DEBUG TRIGGER ======================
-// Useful during development
+// ====================== MANUAL DEBUG ======================
 global.triggerInference = () => {
     console.log(`[Client] Manual inference trigger activated`);
     client.sendStimulus('imu', { infer: true });
 };
 
-// Connect to brain
 client.connect();
 
 console.log(`[Client] Brain client initialized - IMU every 2s, inference every ~16s`);
