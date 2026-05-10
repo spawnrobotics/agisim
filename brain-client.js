@@ -1,15 +1,14 @@
-// brain-client.js
 const WebSocket = require('ws');
 
 class BrainClient {
-    constructor(apiKey, options = {}) {
-        this.apiKey = apiKey || process.env.BRAIN_API_KEY;
-        if (!this.apiKey) {
-            console.error('[BrainClient] ERROR: No API key provided!');
+    constructor(brainId, options = {}) {
+        this.brainId = brainId || process.env.BRAIN_ID;
+        if (!this.brainId) {
+            console.error('[BrainClient] ERROR: No brainId provided!');
+            console.error('   → Set BRAIN_ID environment variable or pass it to constructor');
             process.exit(1);
         }
 
-        this.agentId = this.apiKey;
         this.ws = null;
         this.isConnected = false;
 
@@ -30,22 +29,22 @@ class BrainClient {
     }
 
     connect() {
-        const url = `ws://localhost:3000/ws?key=${encodeURIComponent(this.apiKey)}`;
+        const url = `ws://localhost:3000/ws?brainId=${encodeURIComponent(this.brainId)}`;
 
-        console.log(`[BrainClient] Connecting to brain with key: ${this.apiKey.substring(0, 12)}...`);
+        console.log(`[BrainClient] Connecting with brainId: ${this.brainId}`);
 
         this.ws = new WebSocket(url);
 
         this.ws.on('open', () => {
             this.isConnected = true;
-            console.log(`[BrainClient] ✅ Connected successfully`);
+            console.log(`[BrainClient] ✅ Connected successfully with brainId: ${this.brainId}`);
 
-            // Send join with recommended generic throttling config
+            // Send join with brainId (this is the new standard)
             this.ws.send(JSON.stringify({
                 type: 'join',
-                agentId: this.agentId,
+                brainId: this.brainId,
                 genericConfig: {
-                    imus: 5,      // Allow up to ~200 Hz IMU
+                    imus: 5,      // Allow high-frequency IMU
                     text: 50,     // Text thoughts
                     stat: 1000,   // Status updates
                     sens: 20      // Generic sensors
@@ -79,7 +78,8 @@ class BrainClient {
 
         this.ws.on('close', () => {
             this.isConnected = false;
-            console.log('[BrainClient] Disconnected');
+            console.log(`[BrainClient] Disconnected (brainId: ${this.brainId})`);
+
             if (this.onDisconnect) this.onDisconnect();
 
             if (this.options.autoReconnect) {
@@ -89,19 +89,12 @@ class BrainClient {
         });
 
         this.ws.on('error', (err) => {
-            console.error('[BrainClient] Error:', err.message);
+            console.error(`[BrainClient] Error for brain ${this.brainId}:`, err.message);
         });
     }
 
     // ====================== SEND DATA ======================
 
-    /**
-     * Send video frame to the brain.
-     * 
-     * IMPORTANT: Only send 32x32 RGBA frames!
-     * - Buffer length must be exactly 4096 bytes (32 * 32 * 4).
-     * - Format: RGBA (4 bytes per pixel, no padding).
-     */
     sendVideo(rgbaBuffer) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
@@ -111,7 +104,7 @@ class BrainClient {
 
         const header = Buffer.from('VIDE');
         this.ws.send(Buffer.concat([header, Buffer.from(rgbaBuffer)]));
-        console.log(`[Client 📤] sendVideo | 4096 bytes`);
+        // console.log(`[Client 📤] sendVideo | 4096 bytes`);   // uncomment for debug
     }
 
     sendAudio(float32Array) {
@@ -120,19 +113,15 @@ class BrainClient {
         const header = Buffer.from('AUIO');
         const audioBuf = Buffer.from(float32Array.buffer);
         this.ws.send(Buffer.concat([header, audioBuf]));
-        console.log(`[Client 📤] sendAudio | ${audioBuf.length} bytes`);
+        // console.log(`[Client 📤] sendAudio | ${audioBuf.length} bytes`);
     }
 
-    /**
-     * General sensor / data stimulus (uses IMUS header)
-     */
     sendStimulus(type, data = {}) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
         const now = Date.now();
         const last = this.lastGenericSendTime.get(type) || 0;
 
-        // Light client-side warning if sending too fast
         if (now - last < 5) {
             console.warn(`[Client ⚠️] Sending "${type}" very frequently - server may throttle`);
         }
@@ -147,17 +136,13 @@ class BrainClient {
 
         const header = Buffer.from('IMUS');
         const jsonBuf = Buffer.from(JSON.stringify(payload));
-        const totalSize = header.length + jsonBuf.length;
 
         const inferFlag = data.infer ? ' (infer)' : '';
-        console.log(`[Client 📤] sendStimulus('${type}') | ${totalSize} bytes${inferFlag}`);
+        console.log(`[Client 📤] sendStimulus('${type}') | ${header.length + jsonBuf.length} bytes${inferFlag}`);
 
         this.ws.send(Buffer.concat([header, jsonBuf]));
     }
 
-    /**
-     * Dedicated Text Stimulus (uses TEXT header)
-     */
     sendText(text, extra = {}) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
@@ -170,10 +155,9 @@ class BrainClient {
 
         const header = Buffer.from('TEXT');
         const jsonBuf = Buffer.from(JSON.stringify(payload));
-        const totalSize = header.length + jsonBuf.length;
 
         const inferFlag = extra.infer ? ' (infer)' : '';
-        console.log(`[Client 📤] sendText() | ${totalSize} bytes${inferFlag}`);
+        console.log(`[Client 📤] sendText() | ${header.length + jsonBuf.length} bytes${inferFlag}`);
 
         const short = text.length > 70 ? text.substring(0, 67) + '...' : text;
         console.log(`[Client] Sent text: "${short}"`);
@@ -181,9 +165,6 @@ class BrainClient {
         this.ws.send(Buffer.concat([header, jsonBuf]));
     }
 
-    /**
-     * Advanced: Send stimulus with custom 4-character header
-     */
     sendStimulusWithHeader(headerStr, type, data = {}) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
@@ -198,14 +179,12 @@ class BrainClient {
 
         const header = Buffer.from(headerStr.toUpperCase().substring(0, 4).padEnd(4, ' '));
         const jsonBuf = Buffer.from(JSON.stringify(payload));
-        const totalSize = header.length + jsonBuf.length;
 
-        console.log(`[Client 📤] sendStimulusWithHeader('${headerStr}', '${type}') | ${totalSize} bytes`);
+        console.log(`[Client 📤] sendStimulusWithHeader('${headerStr}', '${type}') | ${header.length + jsonBuf.length} bytes`);
 
         this.ws.send(Buffer.concat([header, jsonBuf]));
     }
 
-    // ====================== UTILS ======================
     disconnect() {
         if (this.ws) this.ws.close();
     }

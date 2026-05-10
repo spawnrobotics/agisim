@@ -1,7 +1,10 @@
 // your-main-client.js
 const BrainClient = require('brain-client');
 
-const client = new BrainClient(process.env.BRAIN_API_KEY || 'your-api-key-here');
+// Use BRAIN_ID environment variable
+const client = new BrainClient(
+    process.env.BRAIN_ID || 'your-brain-id-here'
+);
 
 let inferenceCounter = 0;
 let textThoughtCounter = 0;
@@ -10,6 +13,7 @@ let genericSendCounter = 0;
 // ====================== CONNECTION ======================
 client.onConnect = () => {
     console.log('🤖 Connected to Cortex Brain');
+    console.log(`   Brain ID: ${client.brainId}`);
 
     client.sendStimulus('status', {
         state: 'online',
@@ -97,4 +101,7 @@ global.triggerInference = () => {
 
 client.connect();
 
-console.log(`[Client] Brain client initialized - IMU every 2s, inference every ~16s`);
+console.log(`[Client] Brain client initialized`);
+console.log(`   → IMU every 2s`);
+console.log(`   → Inference trigger every ~16s`);
+console.log(`   → Using brainId: ${process.env.BRAIN_ID || 'your-brain-id-here'}`);
