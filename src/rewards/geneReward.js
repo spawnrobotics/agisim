@@ -328,6 +328,7 @@ export function tickLimitsExplorer(state, model, data, cfg = {}, mujoco = null) 
     };
 }
 
+/** Mean of per-actuator scores over any index list (arm, leg, waist, …). */
 export function meanActuatorReward(actuatorRewards, indices) {
     if (!actuatorRewards || !indices?.length) return 0;
     let s = 0;
@@ -344,124 +345,21 @@ export function meanActuatorReward(actuatorRewards, indices) {
 }
 
 export function rewardForGene(gene, pose, geneOpts = {}) {
-    const cfg = { ...GENE_DEFAULTS[gene], ...(geneOpts[gene] || geneOpts) };
-    const pelvis = Number(pose.pelvisHeight) || 0;
-    const head = Number(pose.headHeight) || 0;
-    const upright = Number(pose.upright) || 0;
-    const qvelRms = Number(pose.qvelRms) || 0;
-    const ctrlRms = Number(pose.ctrlRms) || 0;
-    const dx = Number(pose.dx) || 0;
-    const dy = Number(pose.dy) || 0;
-    const forward = Math.hypot(dx, dy);
-
-    if (gene === 'limits') {
-        const explore = pose.limitsExplore || {};
-        const targetTerm = clamp01(explore.targetTerm ?? 0);
-        const approachTerm = clamp01(explore.approachTerm ?? 0.5);
-        const repeatPen = clamp01(explore.repeatPen ?? 0);
-        const motion = clamp01(qvelRms / (cfg.motionScale || 0.35));
-        const smooth = 1 - clamp01(ctrlRms / (cfg.ctrlScale || 0.8));
-        const uprightTerm = clamp01((upright + 0.2) / 1.2);
-        const sidePen = clamp01((0.45 - Math.abs(upright)) / 0.45);
-        const fallenPen = pose.fallen ? 1 : sidePen;
-
-        let r =
-            (cfg.wTarget ?? 0.55) * targetTerm +
-            (cfg.wApproach ?? 0.40) * approachTerm -
-            (cfg.wRepeat ?? 0.50) * repeatPen +
-            (cfg.wMotion ?? 0.08) * motion +
-            (cfg.wSmooth ?? 0.08) * smooth -
-            (cfg.wCtrl ?? 0.06) * clamp01(ctrlRms) +
-            (cfg.wUpright ?? 0.45) * uprightTerm -
-            (cfg.wSide ?? 0.85) * fallenPen;
-
-        if (fallenPen > 0.5) {
-            r = Math.min(r, 0.15 - fallenPen);
-        }
-        return clamp11(r);
+    const name = String(gene || 'stand');
+    if (name !== 'stand') {
+        return clamp11(Number(pose.reward) || 0);
     }
 
-    if (gene === 'roll') {
-        const qw = Number(pose.qw);
-        const qx = Number(pose.qx) || 0;
-        const qy = Number(pose.qy) || 0;
-        const qz = Number(pose.qz) || 0;
-        const chestUp = Number.isFinite(qw)
-            ? (2 * (qx * qz - qw * qy))
-            : (Number(pose.chestUp) || 0);
-
-        const yawVel = Number(pose.waistYawVel) || 0;
-        const spinRms = Number(pose.spinRms) || 0;
-        const dChest = Number(pose.dChest) || 0;
-        const flipped = Number(pose.flipped) || 0;
-
-        const face = clamp11(chestUp);
-        const absChest = Math.abs(face);
-        const phase = clamp01(1 - absChest);
-
-        const flatStart = cfg.flatStart ?? 0.22;
-        const bellyStart = cfg.bellyStart ?? 0.12;
-        const onBack = clamp01((face - flatStart) / Math.max(1e-3, 1 - flatStart));
-        const onBelly = clamp01((-face - bellyStart) / Math.max(1e-3, 1 - bellyStart));
-        const onFlat = clamp01(Math.max(onBack, onBelly));
-
-        const yawMag = clamp01(Math.abs(yawVel) / (cfg.yawVelScale || 1.4));
-        const spinMag = clamp01(spinRms / (cfg.spinScale || 1.1));
-        const rawSpeed = clamp01(0.65 * yawMag + 0.35 * spinMag);
-
-        const leaveRaw = Math.max(0, -face * dChest) / Math.max(1e-4, cfg.dChestScale || 0.08);
-        const leaveFlat = clamp01(leaveRaw);
-
-        const dead = Math.max(0, cfg.rollDeadzone ?? 0.14);
-        const noise = Math.max(0, cfg.flailNoise ?? 0.03);
-        const usefulSpeed = clamp01((rawSpeed - dead) / Math.max(1e-3, 1 - dead));
-        const usefulLeave = clamp01((leaveFlat - dead) / Math.max(1e-3, 1 - dead));
-
-        const rollTerm = clamp01(
-            phase * (0.25 + 0.75 * usefulSpeed) + 0.45 * usefulLeave
-        );
-
-        const motion = clamp01(qvelRms / (cfg.motionScale || 0.35));
-        const wasted = clamp01(Math.max(0, motion - usefulSpeed - usefulLeave - noise));
-        const stuckFlat = onFlat * (1 - usefulSpeed);
-        const flailFlat = onFlat * wasted;
-
-        const flatCost = clamp01(
-            (cfg.wFlat ?? 0.70) * onFlat +
-            (cfg.wFlatBelly ?? 0.40) * onBelly +
-            (cfg.wStuckFlat ?? 0.55) * stuckFlat +
-            (cfg.wFlail ?? 0.35) * flailFlat
-        );
-
-        const pos =
-            (cfg.wRoll ?? 0.70) * rollTerm +
-            (cfg.wProgress ?? 0.28) * usefulLeave +
-            (cfg.wFlip ?? 0.40) * flipped +
-            (cfg.wHeight ?? 0.04) * bandReward(pelvis, cfg.pelvisLo ?? 0.08, cfg.pelvisHi ?? 0.32) -
-            (cfg.wCtrl ?? 0.02) * clamp01(ctrlRms);
-
-        const r = onFlat > 0.55
-            ? clamp11(pos * (1 - onFlat) - flatCost)
-            : clamp11(pos - flatCost);
-
-        pose.chestUp = chestUp;
-        pose.proneTerm = onBelly;
-        pose.spinTerm = rollTerm;
-        return r;
-    }
-
-    if (gene === 'quad') {
-        const poseTerm =
-            0.6 * bandReward(pelvis, cfg.pelvisLo, cfg.pelvisHi) +
-            0.4 * bandReward(head, cfg.headLo, cfg.headHi);
-        const uTerm = 1 - Math.min(1, Math.abs(upright - (cfg.targetUpright ?? 0.25)));
-        const r =
-            cfg.wPose * poseTerm +
-            cfg.wUpright * clamp01(uTerm) +
-            cfg.wProgress * clamp01(Number(pose.progressTerm) || 0) -
-            cfg.wCtrl * clamp01(ctrlRms);
-        return clamp11(r * 2 - 0.45);
-    }
+    const cfg = { ...GENE_DEFAULTS.stand, ...(geneOpts.stand || geneOpts) };
+    void cfg;
+    void bandReward;
+    void pose.pelvisHeight;
+    void pose.headHeight;
+    void pose.upright;
+    void pose.qvelRms;
+    void pose.ctrlRms;
+    void pose.dx;
+    void pose.dy;
 
     return clamp11(Number(pose.reward) || 0);
 }

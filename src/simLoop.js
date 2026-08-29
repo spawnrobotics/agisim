@@ -21,11 +21,18 @@ export function createSimLoop({
     rewardOpts = {},
     curriculumOpts = {},
     robot = CONFIG.robot,
+    motorGroups = null,
 }) {
     let rafId = 0;
     let stepCount = 0;
     let lastRewardAt = 0;
     let running = false;
+
+    const groups = motorGroups
+        || brainWS?.getMotorGroups?.()
+        || brainWS?.getGroups?.()
+        || brainWS?.groups
+        || [];
 
     const geneOpts = {
         ...(robot?.geneOpts || {}),
@@ -34,9 +41,9 @@ export function createSimLoop({
 
     const curriculum = createRewardCurriculum({
         enabled: curriculumOpts.enabled !== false,
-        startGene: curriculumOpts.startGene || 'limits',
-        autoAdvance: curriculumOpts.autoAdvance !== false,
-        decayAdvance: curriculumOpts.decayAdvance !== false,
+        startGene: curriculumOpts.startGene || 'stand',
+        autoAdvance: false,
+        decayAdvance: false,
         robot,
         geneOpts,
         chestAxis: robot?.chestAxis,
@@ -129,5 +136,6 @@ export function createSimLoop({
         getCurriculum: () => curriculum,
         getGene: () => curriculum.getGene(),
         setGene: (g) => curriculum.setGene(g),
+        getMotorGroups: () => groups,
     };
 }

@@ -8,6 +8,7 @@ import {
 import CONFIG from './config.js';
 import { createBrainMotor } from './brainMotor.js';
 import { createMotorGroups } from './motorGroups.js';
+import { getObsSizes } from './motorObs.js';
 import {
     setLastMotorOutcome,
     outcomeToJsonMessage,
@@ -51,9 +52,23 @@ function isMotorHeader(header) {
     return header === 'MOTO' || header === 'MOTR' || /^MOT[1-9]$/.test(header);
 }
 
+function sameIntList(a, b) {
+    return (
+        Array.isArray(a) &&
+        Array.isArray(b) &&
+        a.length === b.length &&
+        a.every((n, i) => Number(n) === Number(b[i]))
+    );
+}
+
 export function createBrainWS({
     model,
     data,
+    motorGroups: groupsIn = null,
+    actionSizes: sizesIn = null,
+    obsSizes: obsIn = null,
+    visualCount: visualCountIn,
+    auditoryCount: auditoryCountIn,
     onCtrlChanged = () => { },
     onStatus = () => { },
     onReady = () => { },
@@ -65,17 +80,21 @@ export function createBrainWS({
     let reconnectTimer = null;
     let intentionalClose = false;
 
-    const motorGroups = typeof createMotorGroups === 'function'
-        ? createMotorGroups(model)
-        : [];
+    const motorGroups = Array.isArray(groupsIn) && groupsIn.length
+        ? groupsIn
+        : (typeof createMotorGroups === 'function' ? createMotorGroups(model) : []);
 
-    const actionSizes = motorGroups.length
-        ? motorGroups.map((g) => g.actionSize)
-        : [model.nu];
+    const actionSizes = Array.isArray(sizesIn) && sizesIn.length
+        ? sizesIn.slice()
+        : (motorGroups.length ? motorGroups.map((g) => g.actionSize) : [model.nu]);
+
+    const obsSizes = Array.isArray(obsIn) && obsIn.length
+        ? obsIn.slice()
+        : getObsSizes(motorGroups);
 
     const motorCount = actionSizes.length;
-    const visualCount = CONFIG.visualCount || 1;
-    const auditoryCount = CONFIG.auditoryCount || 1;
+    const visualCount = visualCountIn ?? CONFIG.visualCount ?? 1;
+    const auditoryCount = auditoryCountIn ?? CONFIG.auditoryCount ?? 1;
     const primaryActionSize = actionSizes[0] ?? model.nu;
 
     function setStatus(msg, color) {
@@ -221,16 +240,18 @@ export function createBrainWS({
                         });
                     }
 
-                    if (Array.isArray(msg.actionSizes)) {
-                        const same =
-                            msg.actionSizes.length === actionSizes.length &&
-                            msg.actionSizes.every((n, i) => Number(n) === actionSizes[i]);
-                        if (!same) {
-                            console.warn('[BrainWS] actionSizes mismatch', {
-                                server: msg.actionSizes,
-                                local: actionSizes,
-                            });
-                        }
+                    if (Array.isArray(msg.actionSizes) && !sameIntList(msg.actionSizes, actionSizes)) {
+                        console.warn('[BrainWS] actionSizes mismatch', {
+                            server: msg.actionSizes,
+                            local: actionSizes,
+                        });
+                    }
+
+                    if (Array.isArray(msg.obsSizes) && !sameIntList(msg.obsSizes, obsSizes)) {
+                        console.warn('[BrainWS] obsSizes mismatch', {
+                            server: msg.obsSizes,
+                            local: obsSizes,
+                        });
                     }
 
                     setStatus(
@@ -244,6 +265,7 @@ export function createBrainWS({
                         visualCount,
                         auditoryCount,
                         actionSizes,
+                        obsSizes,
                         headers: msg.headers || {
                             visual: Array.from({ length: visualCount }, (_, i) => `VIS${i + 1}`),
                             auditory: Array.from({ length: auditoryCount }, (_, i) => `AUD${i + 1}`),
@@ -328,6 +350,7 @@ export function createBrainWS({
                     brainId: getStoredBrainId(),
                     actionSize: primaryActionSize,
                     actionSizes,
+                    obsSizes,
                     motorCount,
                     visualCount,
                     auditoryCount,
@@ -386,6 +409,7 @@ export function createBrainWS({
         getBrainId: getStoredBrainId,
         getActionSize: () => primaryActionSize,
         getActionSizes: () => actionSizes.slice(),
+        getObsSizes: () => obsSizes.slice(),
         getMotorCount: () => motorCount,
         getMotorGroups: () => motorGroups,
         updateMotorOutcome: setLastMotorOutcome,

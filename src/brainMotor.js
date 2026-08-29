@@ -1,13 +1,28 @@
 // brainMotor.js
 import CONFIG from './config.js';
 import {
-    MOTOR_OUTCOME_EXTRA,
-    packJointsWithOutcome,
     getLastMotorOutcome,
     resolveAdvantageFromOutcome,
 } from './rewards/rewards.js';
 import { createTouchOutcome } from './rewards/touch.js';
-import { createMotorGroups } from './motorGroups.js';
+import {
+    createMotorGroups,
+    getLegGroups,
+    getWaistGroup,
+    getManipGroups,
+    getGazeGroup,
+    assertGroupsCoverNu,
+} from './motorGroups.js';
+import {
+    packGroupObservation,
+    packAllGroupObservations,
+    readGlobalMotorState,
+    obsSizeForGroup,
+    getObsSizes,
+    GLOBAL_OBS_N,
+    LOCAL_PLANES,
+    OUTCOME_OBS_N,
+} from './motorObs.js';
 
 export function createBrainMotor({
     model,
@@ -17,15 +32,30 @@ export function createBrainMotor({
     onCtrlChanged = () => { },
     groups: groupsOverride = null,
     enableTouch = false,
+    extractOpts = {},
 }) {
     const groups = (groupsOverride?.length
         ? groupsOverride
         : createMotorGroups(model)
     ).filter((g) => g?.indices?.length);
 
-    const fullActionSize = model.nu;
+    const fullActionSize = model.nu | 0;
     const actionSizes = groups.map((g) => g.actionSize);
+    const obsSizes = getObsSizes(groups);
     const motorCount = groups.length;
+
+    const legGroups = getLegGroups(groups);
+    const waistGroup = getWaistGroup(groups);
+    const manipGroups = getManipGroups(groups);
+    const gazeGroup = getGazeGroup(groups);
+
+    const cover = assertGroupsCoverNu(groups, fullActionSize);
+    if (!cover.ok) {
+        console.warn('[BrainMotor] actuator cover', cover.reason, {
+            nu: fullActionSize,
+            groups: groups.map((g) => `${g.header}:${g.id}:${g.actionSize}`),
+        });
+    }
 
     const MOTOR_INTERVAL_MS = 1000 / (CONFIG.motorFps || 20);
     const MOTOR_LOG = false;
@@ -80,65 +110,13 @@ export function createBrainMotor({
         return out.buffer;
     }
 
-    function outcomeFromActuators(global, indices) {
-        const arr = global?.actuatorRewards;
-        if (!arr || !indices?.length) return null;
-        let s = 0;
-        let n = 0;
-        for (let i = 0; i < indices.length; i++) {
-            const k = indices[i] | 0;
-            if (k < 0 || k >= arr.length) continue;
-            const v = Number(arr[k]);
-            if (!Number.isFinite(v)) continue;
-            s += v;
-            n++;
-        }
-        if (!n) return null;
-        const reward = Math.max(-1, Math.min(1, s / n));
-        return {
-            reward,
-            posSum: Math.max(0, reward),
-            negSum: Math.max(0, -reward),
-            valence: reward,
-            source: 'limits:group',
-        };
+    /** Shared stand/walk outcome on every group. Touch is additive metadata only. */
+    function outcomeForGroup(_group) {
+        return getLastMotorOutcome();
     }
 
-    function outcomeForGroup(group) {
-        const global = getLastMotorOutcome();
-        const touchO = touch.getGroupTouchOutcome?.(group?.header)
-            || touch.resolveGroupOutcome(group?.header, null);
-        if (touchO) return touchO;
-        const local = outcomeFromActuators(global, group?.indices);
-        if (local) return local;
-        return global;
-    }
-
-    function packGroupTx(group, joints) {
-        const outcome = outcomeForGroup(group);
-        return packJointsWithOutcome(joints, outcome);
-    }
-
-    function buildGroupState(group) {
-        const buf = new Float32Array(group.actionSize);
-        const offset = 7; // free joint
-        for (let j = 0; j < group.indices.length; j++) {
-            const qi = offset + group.indices[j];
-            const v = qi < data.qpos.length ? data.qpos[qi] : 0;
-            buf[j] = Number.isFinite(v) ? v : 0;
-        }
-        return buf;
-    }
-
-    function buildMotorState() {
-        const n = model.nu;
-        const buf = new Float32Array(n);
-        const offset = 7;
-        for (let i = 0; i < n; i++) {
-            const v = data.qpos[offset + i];
-            buf[i] = Number.isFinite(v) ? v : 0;
-        }
-        return buf;
+    function packGroupTx(group, globalState, outcome) {
+        return packGroupObservation(model, data, group, outcome, globalState);
     }
 
     function applyGroupAction(group, actions) {
@@ -203,6 +181,7 @@ export function createBrainMotor({
         motorLog('RX sequence start', {
             header,
             group: group.id,
+            role: group.role,
             seqId: myId,
             frameCount: frames.length,
             actionSize: group.actionSize,
@@ -251,34 +230,53 @@ export function createBrainMotor({
         if (now - lastMotorSend < MOTOR_INTERVAL_MS) return;
         lastMotorSend = now;
 
+        const outcome = getLastMotorOutcome();
+        const globalState = readGlobalMotorState(model, data, outcome, extractOpts);
+
         if (!groups.length) {
-            const joints = buildMotorState();
-            const packed = packJointsWithOutcome(joints, getLastMotorOutcome());
+            const packed = packGroupObservation(
+                model,
+                data,
+                {
+                    header: 'MOTO',
+                    id: 'all',
+                    indices: Array.from({ length: fullActionSize }, (_, i) => i),
+                    actionSize: fullActionSize,
+                },
+                outcome,
+                globalState
+            );
             sendBinary(packHeader('MOTO', packed));
             txCount++;
             return;
         }
 
         for (const group of groups) {
-            const joints = buildGroupState(group);
-            const packed = packGroupTx(group, joints);
+            const packed = packGroupTx(group, globalState, outcome);
             sendBinary(packHeader(group.header, packed));
         }
 
         txCount++;
         if (now - lastTxLogAt >= MOTOR_LOG_EVERY_MS) {
-            const o = getLastMotorOutcome();
             const snap = touch.getTouchSnapshot();
             motorLog('TX MOT*', {
                 packetsThisSec: txCount,
-                groups: groups.map((g) => `${g.header}:${g.actionSize}`),
-                trailerOnAll: true,
-                extra: MOTOR_OUTCOME_EXTRA,
+                groups: groups.map(
+                    (g) => `${g.header}:${g.id}:${g.role}:act=${g.actionSize}:obs=${obsSizeForGroup(g)}`
+                ),
+                layout: {
+                    global: GLOBAL_OBS_N,
+                    localPlanes: LOCAL_PLANES,
+                    outcome: OUTCOME_OBS_N,
+                },
                 global: {
-                    reward: o?.reward,
-                    posSum: o?.posSum,
-                    negSum: o?.negSum,
-                    advantage: +resolveAdvantageFromOutcome(o).toFixed(3),
+                    reward: outcome?.reward,
+                    posSum: outcome?.posSum,
+                    negSum: outcome?.negSum,
+                    advantage: +resolveAdvantageFromOutcome(outcome).toFixed(3),
+                    upright: globalState.upright,
+                    pelvis_z: globalState.pelvis_z,
+                    vx: globalState.vx,
                 },
                 touch: snap.enabled ? snap.groups : 'off',
             });
@@ -290,10 +288,24 @@ export function createBrainMotor({
     function sendZeroActionSequence() {
         if (!isReady()) return false;
 
+        const outcome = getLastMotorOutcome();
+        const globalState = readGlobalMotorState(model, data, outcome, extractOpts);
+
         if (!groups.length) {
             const zeros = new Float32Array(fullActionSize);
             applyAction(zeros);
-            const packed = packJointsWithOutcome(zeros, getLastMotorOutcome());
+            const packed = packGroupObservation(
+                model,
+                data,
+                {
+                    header: 'MOTO',
+                    id: 'all',
+                    indices: Array.from({ length: fullActionSize }, (_, i) => i),
+                    actionSize: fullActionSize,
+                },
+                outcome,
+                globalState
+            );
             sendBinary(packHeader('MOTO', packed));
             return true;
         }
@@ -301,13 +313,12 @@ export function createBrainMotor({
         for (const group of groups) {
             const zeros = new Float32Array(group.actionSize);
             startPlayback(group, [zeros]);
-            sendBinary(packHeader(group.header, packGroupTx(group, zeros)));
+            sendBinary(packHeader(group.header, packGroupTx(group, globalState, outcome)));
         }
 
         motorLog('TX zero action sequence', {
             groups: groups.map((g) => `${g.header}:${g.actionSize}`),
-            extra: MOTOR_OUTCOME_EXTRA,
-            trailerOnAll: true,
+            obsSizes,
         });
         return true;
     }
@@ -402,6 +413,7 @@ export function createBrainMotor({
             motorLog('RX MOT*', {
                 packetsThisSec: rxCount,
                 header: group.header,
+                role: group.role,
                 lastSeqFrames: frames.length,
                 actionSize: as,
                 multiFrame: uint8[4] === 2,
@@ -423,17 +435,25 @@ export function createBrainMotor({
     return {
         actionSize: groups[0]?.actionSize ?? fullActionSize,
         actionSizes,
+        obsSizes,
         motorCount,
         groups,
+        legGroups,
+        waistGroup,
+        manipGroups,
+        gazeGroup,
         getGroups: () => groups,
+        getObsSizes: () => obsSizes.slice(),
+        packAll: (outcome) =>
+            packAllGroupObservations(model, data, groups, outcome || getLastMotorOutcome(), extractOpts),
         startLoop,
         stopLoop,
         sendMotorFrame,
         sendZeroActionSequence,
         handleRx,
         resetCounters,
-        buildMotorState,
-        buildGroupState,
+        applyGroupAction,
+        applyAction,
         isPlaying: () => [...play.values()].some((s) => !!s.queue),
         getPlayProgress: () => {
             const out = {};
@@ -444,7 +464,6 @@ export function createBrainMotor({
             }
             return out;
         },
-        // touch (off until enableTouch(true))
         enableTouch: (on) => touch.enableTouch(on),
         isTouchEnabled: () => touch.isTouchEnabled(),
         setGroupTouchOutcome: (header, outcome) =>

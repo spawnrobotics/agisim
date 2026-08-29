@@ -108,7 +108,7 @@ function resolveFirst(fn, names) {
 
 function fallbackTorsoId(model) {
     const n = model?.nbody | 0;
-    if (n > 1) return 1; 
+    if (n > 1) return 1;
     return -1;
 }
 
@@ -207,6 +207,16 @@ export function setLastMotorOutcome(outcome) {
 
 export function clearMotorOutcome() {
     lastOutcome = emptyOutcome();
+}
+
+function rmsArrayLocal(arr, n) {
+    let s = 0;
+    const m = Math.max(1, n | 0);
+    for (let i = 0; i < m; i++) {
+        const v = Number(arr[i]) || 0;
+        s += v * v;
+    }
+    return Math.sqrt(s / m);
 }
 
 export function extractReward(model, data, opts = {}) {
@@ -331,16 +341,6 @@ export function extractReward(model, data, opts = {}) {
     return outcome;
 }
 
-function rmsArrayLocal(arr, n) {
-    let s = 0;
-    const m = Math.max(1, n | 0);
-    for (let i = 0; i < m; i++) {
-        const v = Number(arr[i]) || 0;
-        s += v * v;
-    }
-    return Math.sqrt(s / m);
-}
-
 function outcomeSignal(o) {
     if (Number.isFinite(Number(o.reward))) return clamp11(o.reward);
     if (Number.isFinite(Number(o.valence))) return clamp11(o.valence);
@@ -361,20 +361,6 @@ export function outcomeToStimAmount(outcome = null, minAbs = STIM_NEAR_ZERO) {
 
     if (Math.abs(amount) < minAbs) return 0;
     return amount;
-}
-
-export function packJointsWithOutcome(joints, outcome = null) {
-    const o = outcome || lastOutcome;
-    const n = joints?.length || 0;
-    const out = new Float32Array(n + MOTOR_OUTCOME_EXTRA);
-    for (let i = 0; i < n; i++) {
-        const v = Number(joints[i]);
-        out[i] = Number.isFinite(v) ? v : 0;
-    }
-    out[n] = Number.isFinite(Number(o.reward)) ? Number(o.reward) : 0;
-    out[n + 1] = Math.max(0, Number(o.posSum) || 0);
-    out[n + 2] = Math.max(0, Number(o.negSum) || 0);
-    return out;
 }
 
 export function outcomeToJsonMessage(outcome = null, source = 'mujoco') {

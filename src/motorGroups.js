@@ -7,9 +7,12 @@ const GROUP_DEFS = [
     { id: 'right_hand', match: [/right_.*(wrist|hand|finger)/i] },
     { id: 'left_leg', match: [/left_.*(hip|knee|ankle)/i] },
     { id: 'right_leg', match: [/right_.*(hip|knee|ankle)/i] },
+    { id: 'waist', match: [/(waist|torso|pelvis|trunk)/i] },
     { id: 'head', match: [/(^|_)(neck|head|beak|jaw|mouth)(_|$)/i] },
-    { id: 'torso', match: [/(waist|torso|pelvis|trunk)/i] },
 ];
+
+const MANIP_IDS = new Set(['left_arm', 'right_arm', 'left_hand', 'right_hand']);
+const LEG_IDS = new Set(['left_leg', 'right_leg']);
 
 function readCString(names, start) {
     if (names == null || start == null || start < 0) return '';
@@ -51,6 +54,25 @@ function matchesGroup(name, def) {
     return def.match.some((re) => re.test(s));
 }
 
+function roleFor(id) {
+    if (MANIP_IDS.has(id)) return 'manip';
+    if (LEG_IDS.has(id)) return 'leg';
+    if (id === 'waist') return 'waist';
+    if (id === 'head') return 'gaze';
+    return 'other';
+}
+
+function finalizeGroup(def, indices, names) {
+    return {
+        id: def.id,
+        name: def.id,
+        indices,
+        names,
+        actionSize: indices.length,
+        role: roleFor(def.id),
+    };
+}
+
 export function createMotorGroups(model) {
     if (!model || !(model.nu > 0)) return [];
 
@@ -70,13 +92,7 @@ export function createMotorGroups(model) {
             assigned.add(i);
         }
         if (!indices.length) continue;
-        groups.push({
-            id: def.id,
-            name: def.id,
-            indices,
-            names,
-            actionSize: indices.length,
-        });
+        groups.push(finalizeGroup(def, indices, names));
     }
 
     const restIdx = [];
@@ -93,10 +109,10 @@ export function createMotorGroups(model) {
             indices: restIdx,
             names: restNames,
             actionSize: restIdx.length,
+            role: 'other',
         });
     }
 
-    // Compact headers after dropping empty groups: MOT1…MOTN
     for (let g = 0; g < groups.length; g++) {
         groups[g].index = g + 1;
         groups[g].header = `MOT${g + 1}`;
@@ -113,6 +129,45 @@ export function findGroupByHeader(groups, header) {
     const h = String(header || '').toUpperCase();
     if (h === 'MOTO' || h === 'MOTR') return groups?.[0] || null;
     return (groups || []).find((g) => g.header === h) || null;
+}
+
+export function findGroupById(groups, id) {
+    return (groups || []).find((g) => g.id === id) || null;
+}
+
+export function findGroupByRole(groups, role) {
+    return (groups || []).find((g) => g.role === role) || null;
+}
+
+export function getLegGroups(groups) {
+    return (groups || []).filter((g) => g.role === 'leg');
+}
+
+export function getWaistGroup(groups) {
+    return findGroupById(groups, 'waist') || findGroupByRole(groups, 'waist');
+}
+
+export function getManipGroups(groups) {
+    return (groups || []).filter((g) => g.role === 'manip');
+}
+
+export function getGazeGroup(groups) {
+    return findGroupById(groups, 'head') || findGroupByRole(groups, 'gaze');
+}
+
+export function assertGroupsCoverNu(groups, nu) {
+    const n = nu | 0;
+    const seen = new Set();
+    for (const g of groups || []) {
+        for (const i of g.indices || []) {
+            if (seen.has(i)) return { ok: false, reason: `dup index ${i}` };
+            seen.add(i);
+        }
+    }
+    if (seen.size !== n) {
+        return { ok: false, reason: `covered ${seen.size}/${n}` };
+    }
+    return { ok: true };
 }
 
 export default createMotorGroups;

@@ -10,7 +10,15 @@ import { createRobotHeadCamera } from './robotCamera.js';
 import { createMediaStreaming } from './mediaStreaming.js';
 import { createStreamHud } from './streamHUD.js';
 import { createSimLoop } from './simLoop.js';
-import { createMotorGroups } from './motorGroups.js';
+import {
+    createMotorGroups,
+    assertGroupsCoverNu,
+    getLegGroups,
+    getWaistGroup,
+    getManipGroups,
+    getGazeGroup,
+} from './motorGroups.js';
+import { getObsSizes } from './motorObs.js';
 import CONFIG from './config.js';
 
 if (window.__mujocoAppStarted) {
@@ -60,6 +68,57 @@ function bindFollowKeys(setFollow, resetCamera) {
     });
 }
 
+function logMotorLayout(robot, model, motorGroups) {
+    const nu = model?.nu | 0;
+    const cover = assertGroupsCoverNu(motorGroups, nu);
+    const legs = getLegGroups(motorGroups);
+    const waist = getWaistGroup(motorGroups);
+    const gaze = getGazeGroup(motorGroups);
+    const manip = getManipGroups(motorGroups);
+
+    console.log(
+        `[${robot?.id || 'robot'}] motor groups`,
+        motorGroups.map(
+            (g) =>
+                `${g.header} ${g.id} role=${g.role || '?'} n=${g.actionSize} [${g.indices.join(',')}]`
+        )
+    );
+
+    if (!cover.ok) {
+        console.warn(`[${robot?.id || 'robot'}] actuator cover failed:`, cover.reason, {
+            nu,
+            sum: motorGroups.reduce((s, g) => s + (g.actionSize | 0), 0),
+        });
+    } else {
+        console.log(`[${robot?.id || 'robot'}] actuator cover ok nu=${nu}`);
+    }
+
+    if (!legs.length || !waist) {
+        console.warn(`[${robot?.id || 'robot'}] missing leg/waist groups`, {
+            legs: legs.map((g) => g.id),
+            waist: waist?.id || null,
+        });
+    } else {
+        console.log(
+            `[${robot?.id || 'robot'}] legs`,
+            legs.map((g) => `${g.header}:${g.actionSize}`).join(' '),
+            `| waist ${waist.header} n=${waist.actionSize}`
+        );
+    }
+
+    if (gaze) {
+        console.log(`[${robot?.id || 'robot'}] gaze ${gaze.header} n=${gaze.actionSize}`);
+    }
+    if (manip.length) {
+        console.log(
+            `[${robot?.id || 'robot'}] manip`,
+            manip.map((g) => `${g.header}:${g.actionSize}`).join(' ')
+        );
+    }
+
+    return { cover, legs, waist, gaze, manip };
+}
+
 async function main() {
     document.getElementById('brain-panel')?.remove();
     document.getElementById('control-panel')?.remove();
@@ -75,10 +134,8 @@ async function main() {
 
     const motorGroups = createMotorGroups(model);
     const actionSizes = motorGroups.map((g) => g.actionSize);
-    console.log(
-        `[${robot?.id || 'robot'}] motor groups`,
-        motorGroups.map((g) => `${g.header} ${g.id} n=${g.actionSize} [${g.indices.join(',')}]`)
-    );
+    const obsSizes = getObsSizes(motorGroups);
+    const layout = logMotorLayout(robot, model, motorGroups);
 
     const {
         scene,
@@ -131,6 +188,7 @@ async function main() {
         data,
         motorGroups,
         actionSizes,
+        obsSizes,
         visualCount: CONFIG.visualCount ?? 1,
         auditoryCount: CONFIG.auditoryCount ?? 1,
         onCtrlChanged: () => joints.syncFromData(),
@@ -152,6 +210,18 @@ async function main() {
                         robot: robot?.id,
                         server: msg.actionSizes,
                         local: actionSizes,
+                    });
+                }
+            }
+            if (Array.isArray(msg?.obsSizes)) {
+                const sameObs =
+                    msg.obsSizes.length === obsSizes.length &&
+                    msg.obsSizes.every((n, i) => Number(n) === obsSizes[i]);
+                if (!sameObs) {
+                    console.warn('[main] obsSizes mismatch', {
+                        robot: robot?.id,
+                        server: msg.obsSizes,
+                        local: obsSizes,
                     });
                 }
             }
@@ -212,6 +282,8 @@ async function main() {
         hud,
         brainWS,
         brainPanelRef,
+        robot,
+        motorGroups,
     });
     loop.start();
 

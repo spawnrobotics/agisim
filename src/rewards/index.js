@@ -1,7 +1,6 @@
 // rewards/index.js
 export {
     extractReward,
-    extractStandUpReward,
     getLastMotorOutcome,
     setLastMotorOutcome,
     clearMotorOutcome,
@@ -17,3 +16,9 @@ export {
     createTouchOutcome,
     GENE_ORDER,
 } from './rewards.js';
+
+export { extractReward as extractStandUpReward } from './rewards.js';
+
+export { meanActuatorReward } from './geneReward.js';
+
+export { geneExpression } from './genes.js';
