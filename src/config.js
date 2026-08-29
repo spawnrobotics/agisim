@@ -134,8 +134,8 @@ const CONFIG = {
     frameSizes: envIntList('VITE_FRAME_SIZES'),
     actionSizes: envIntList('VITE_ACTION_SIZES'),
 
-    enableLearningVisual: envBool('VITE_LEARNING_VISUAL', true),
-    enableLearningAuditory: envBool('VITE_LEARNING_AUDITORY', true),
+    enableLearningVisual: envBool('VITE_LEARNING_VISUAL', false),
+    enableLearningAuditory: envBool('VITE_LEARNING_AUDITORY', false),
     enableLearningMotor: envBool('VITE_LEARNING_MOTOR', true),
 
     mode: import.meta.env.MODE,
