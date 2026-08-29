@@ -133,6 +133,7 @@ const CONFIG = {
     /** Optional explicit per-instance sizes from env (comma-separated). */
     frameSizes: envIntList('VITE_FRAME_SIZES'),
     actionSizes: envIntList('VITE_ACTION_SIZES'),
+    obsSizes: envIntList('VITE_OBS_SIZES'),
 
     enableLearningVisual: envBool('VITE_LEARNING_VISUAL', false),
     enableLearningAuditory: envBool('VITE_LEARNING_AUDITORY', false),
@@ -170,8 +171,9 @@ export function getWsUrl(brainId = null) {
 /**
  * @param {object} [opts]
  * @param {string|null} [opts.brainId]
- * @param {number} [opts.actionSize]       primary motor (MOT1) width
- * @param {number[]} [opts.actionSizes]    per-motor-cortex widths (joint groups)
+ * @param {number} [opts.actionSize]       primary motor (MOT1) write width
+ * @param {number[]} [opts.actionSizes]    per-motor-cortex action widths
+ * @param {number[]} [opts.obsSizes]       per-motor-cortex observation widths
  * @param {number} [opts.motorCount]
  * @param {number} [opts.visualCount]
  * @param {number} [opts.auditoryCount]
@@ -182,6 +184,7 @@ export function getJoinPayload({
     brainId,
     actionSize,
     actionSizes,
+    obsSizes,
     motorCount,
     visualCount,
     auditoryCount,
@@ -194,6 +197,13 @@ export function getJoinPayload({
             .filter((n) => Number.isFinite(n) && n >= 1)
             .slice(0, MAX_CORTEX_PER_MODALITY)
         : (CONFIG.actionSizes || null);
+
+    const observations = Array.isArray(obsSizes) && obsSizes.length
+        ? obsSizes
+            .map((n) => Math.floor(Number(n)))
+            .filter((n) => Number.isFinite(n) && n >= 1)
+            .slice(0, MAX_CORTEX_PER_MODALITY)
+        : (CONFIG.obsSizes || null);
 
     const frames = Array.isArray(frameSizes) && frameSizes.length
         ? frameSizes
@@ -233,6 +243,7 @@ export function getJoinPayload({
 
     if (primaryAction != null) payload.actionSize = primaryAction;
     if (sizes?.length) payload.actionSizes = sizes.slice(0, mCount);
+    if (observations?.length) payload.obsSizes = observations.slice(0, mCount);
     if (frames?.length) payload.frameSizes = frames.slice(0, vCount);
 
     return payload;
