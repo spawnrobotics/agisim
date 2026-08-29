@@ -57,7 +57,9 @@ export function createMediaStreaming({
 
     // ── local mic ────────────────────────────────────────────
     async function ensureMic() {
-        if (localStream?.getAudioTracks().length) return localStream;
+        if (localStream?.getAudioTracks().some((t) => t.readyState === 'live')) {
+            return localStream;
+        }
         setStatus('Requesting microphone…', '#ffaa00');
         localStream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -67,9 +69,27 @@ export function createMediaStreaming({
             },
             video: false,
         });
-        localStream.getAudioTracks().forEach((t) => { t.enabled = false; });
         setStatus('Microphone ready', '#60a5fa');
         return localStream;
+    }
+
+    function releaseMic() {
+        if (audioSource) {
+            try { audioSource.disconnect(); } catch (_) { }
+            audioSource = null;
+        }
+        if (gainNode) {
+            try { gainNode.disconnect(); } catch (_) { }
+            gainNode = null;
+        }
+        if (audioWorkletNode) {
+            try { audioWorkletNode.disconnect(); } catch (_) { }
+            audioWorkletNode = null;
+        }
+        if (localStream) {
+            localStream.getTracks().forEach((t) => t.stop());
+            localStream = null;
+        }
     }
 
     async function setupAudioProcessing(restart = false) {
@@ -161,7 +181,8 @@ export function createMediaStreaming({
         streaming = false;
         stopVideoLoop();
         if (gainNode) gainNode.gain.value = 0;
-        if (localStream) {
+        if (!audioEnabled) releaseMic();
+        else if (localStream) {
             localStream.getAudioTracks().forEach((t) => { t.enabled = false; });
         }
         setStatus('Streaming stopped', '#ffaa00');
@@ -182,24 +203,31 @@ export function createMediaStreaming({
 
     async function setAudioEnabled(on) {
         const next = !!on;
-        if (next) {
-            try {
-                await ensureMic();
-            } catch (err) {
-                console.error('[Media] mic denied', err);
-                setStatus('Microphone permission denied', '#e24a4a');
-                audioEnabled = false;
-                return false;
-            }
-            localStream.getAudioTracks().forEach((t) => { t.enabled = true; });
-        } else if (localStream) {
-            localStream.getAudioTracks().forEach((t) => { t.enabled = false; });
+
+        if (!next) {
+            audioEnabled = false;
+            if (gainNode) gainNode.gain.value = 0;
+            releaseMic();
+            syncStreaming();
+            return false;
         }
 
-        audioEnabled = next;
-        if (gainNode) gainNode.gain.value = next ? 1 : 0;
+        try {
+            await ensureMic();
+        } catch (err) {
+            console.error('[Media] mic denied', err);
+            setStatus('Microphone permission denied', '#e24a4a');
+            audioEnabled = false;
+            releaseMic();
+            syncStreaming();
+            return false;
+        }
 
-        if (next && streaming && isReady()) {
+        localStream.getAudioTracks().forEach((t) => { t.enabled = true; });
+        audioEnabled = true;
+        if (gainNode) gainNode.gain.value = 1;
+
+        if (streaming && isReady()) {
             await setupAudioProcessing(true);
         }
         syncStreaming();
@@ -253,7 +281,8 @@ export function createMediaStreaming({
             clearTimeout(audioPlaybackTimeout);
             audioPlaybackTimeout = null;
         }
-        if (restoreMic && localStream) {
+        if (restoreMic && micWasOnBeforePlayback) {
+            micWasOnBeforePlayback = false;
             setAudioEnabled(true);
         }
     }
@@ -315,10 +344,11 @@ export function createMediaStreaming({
         stopStreaming();
         if (videoBufferTimer) clearTimeout(videoBufferTimer);
         cleanupAudioPlayback(false);
-        localStream?.getTracks().forEach((t) => t.stop());
-        localStream = null;
+        releaseMic();
         audioContext?.close?.();
         remoteAudioContext?.close?.();
+        audioContext = null;
+        remoteAudioContext = null;
     }
 
     return {
