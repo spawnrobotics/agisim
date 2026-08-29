@@ -15,6 +15,7 @@ import {
     assertGroupsCoverNu,
     getLegGroups,
     getWaistGroup,
+    getLocoGroup,
     getManipGroups,
     getGazeGroup,
 } from './motorGroups.js';
@@ -73,6 +74,7 @@ function logMotorLayout(robot, model, motorGroups) {
     const cover = assertGroupsCoverNu(motorGroups, nu);
     const legs = getLegGroups(motorGroups);
     const waist = getWaistGroup(motorGroups);
+    const loco = getLocoGroup(motorGroups) || waist;
     const gaze = getGazeGroup(motorGroups);
     const manip = getManipGroups(motorGroups);
 
@@ -93,16 +95,18 @@ function logMotorLayout(robot, model, motorGroups) {
         console.log(`[${robot?.id || 'robot'}] actuator cover ok nu=${nu}`);
     }
 
-    if (!legs.length || !waist) {
-        console.warn(`[${robot?.id || 'robot'}] missing leg/waist groups`, {
-            legs: legs.map((g) => g.id),
-            waist: waist?.id || null,
+    if (!legs.length && !loco) {
+        console.warn(`[${robot?.id || 'robot'}] missing loco group`, {
+            groups: motorGroups.map((g) => g.id),
+            roles: motorGroups.map((g) => g.role),
         });
     } else {
         console.log(
-            `[${robot?.id || 'robot'}] legs`,
-            legs.map((g) => `${g.header}:${g.actionSize}`).join(' '),
-            `| waist ${waist.header} n=${waist.actionSize}`
+            `[${robot?.id || 'robot'}] loco`,
+            (loco || waist)?.header,
+            `n=${(loco || waist)?.actionSize}`,
+            '| legs',
+            legs.map((g) => `${g.header}:${g.actionSize}`).join(' ') || 'via loco'
         );
     }
 
@@ -116,7 +120,7 @@ function logMotorLayout(robot, model, motorGroups) {
         );
     }
 
-    return { cover, legs, waist, gaze, manip };
+    return { cover, legs, waist, loco, gaze, manip };
 }
 
 async function main() {

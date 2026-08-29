@@ -9,6 +9,7 @@ import {
     createMotorGroups,
     getLegGroups,
     getWaistGroup,
+    getLocoGroup,
     getManipGroups,
     getGazeGroup,
     assertGroupsCoverNu,
@@ -44,8 +45,9 @@ export function createBrainMotor({
     const obsSizes = getObsSizes(groups);
     const motorCount = groups.length;
 
+    const locoGroup = getLocoGroup(groups);
+    const waistGroup = getWaistGroup(groups) || locoGroup;
     const legGroups = getLegGroups(groups);
-    const waistGroup = getWaistGroup(groups);
     const manipGroups = getManipGroups(groups);
     const gazeGroup = getGazeGroup(groups);
 
@@ -54,6 +56,13 @@ export function createBrainMotor({
         console.warn('[BrainMotor] actuator cover', cover.reason, {
             nu: fullActionSize,
             groups: groups.map((g) => `${g.header}:${g.id}:${g.actionSize}`),
+        });
+    }
+
+    if (!legGroups.length || !waistGroup) {
+        console.warn('[BrainMotor] missing loco grouping', {
+            ids: groups.map((g) => g.id),
+            roles: groups.map((g) => g.role),
         });
     }
 
@@ -438,11 +447,13 @@ export function createBrainMotor({
         obsSizes,
         motorCount,
         groups,
+        locoGroup,
         legGroups,
         waistGroup,
         manipGroups,
         gazeGroup,
         getGroups: () => groups,
+        getLocoGroup: () => locoGroup,
         getObsSizes: () => obsSizes.slice(),
         packAll: (outcome) =>
             packAllGroupObservations(model, data, groups, outcome || getLastMotorOutcome(), extractOpts),

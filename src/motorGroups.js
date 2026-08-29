@@ -1,18 +1,22 @@
 // motorGroups.js
 
 const GROUP_DEFS = [
-    { id: 'left_arm', match: [/left_.*(shoulder|elbow)/i] },
-    { id: 'right_arm', match: [/right_.*(shoulder|elbow)/i] },
-    { id: 'left_hand', match: [/left_.*(wrist|hand|finger)/i] },
-    { id: 'right_hand', match: [/right_.*(wrist|hand|finger)/i] },
-    { id: 'left_leg', match: [/left_.*(hip|knee|ankle)/i] },
-    { id: 'right_leg', match: [/right_.*(hip|knee|ankle)/i] },
-    { id: 'waist', match: [/(waist|torso|pelvis|trunk)/i] },
+    { id: 'left_manip', match: [/left_.*(shoulder|elbow|wrist|hand|finger)/i] },
+    { id: 'right_manip', match: [/right_.*(shoulder|elbow|wrist|hand|finger)/i] },
+    {
+        id: 'loco',
+        match: [
+            /(left|right)_.*(hip|knee|ankle)/i,
+            /(waist|torso|pelvis|trunk)/i,
+        ],
+    },
     { id: 'head', match: [/(^|_)(neck|head|beak|jaw|mouth)(_|$)/i] },
 ];
 
-const MANIP_IDS = new Set(['left_arm', 'right_arm', 'left_hand', 'right_hand']);
-const LEG_IDS = new Set(['left_leg', 'right_leg']);
+const MANIP_IDS = new Set(['left_manip', 'right_manip', 'left_arm', 'right_arm', 'left_hand', 'right_hand']);
+const LEG_IDS = new Set(['left_leg', 'right_leg', 'loco']);
+const WAIST_IDS = new Set(['waist', 'loco']);
+const GAZE_IDS = new Set(['head']);
 
 function readCString(names, start) {
     if (names == null || start == null || start < 0) return '';
@@ -56,9 +60,10 @@ function matchesGroup(name, def) {
 
 function roleFor(id) {
     if (MANIP_IDS.has(id)) return 'manip';
+    if (id === 'loco') return 'loco';
     if (LEG_IDS.has(id)) return 'leg';
     if (id === 'waist') return 'waist';
-    if (id === 'head') return 'gaze';
+    if (GAZE_IDS.has(id)) return 'gaze';
     return 'other';
 }
 
@@ -140,15 +145,27 @@ export function findGroupByRole(groups, role) {
 }
 
 export function getLegGroups(groups) {
-    return (groups || []).filter((g) => g.role === 'leg');
+    return (groups || []).filter(
+        (g) => g.role === 'leg' || g.role === 'loco' || LEG_IDS.has(g.id)
+    );
 }
 
 export function getWaistGroup(groups) {
-    return findGroupById(groups, 'waist') || findGroupByRole(groups, 'waist');
+    return (
+        findGroupById(groups, 'waist') ||
+        findGroupById(groups, 'loco') ||
+        findGroupByRole(groups, 'waist') ||
+        findGroupByRole(groups, 'loco') ||
+        null
+    );
+}
+
+export function getLocoGroup(groups) {
+    return findGroupById(groups, 'loco') || findGroupByRole(groups, 'loco') || getWaistGroup(groups);
 }
 
 export function getManipGroups(groups) {
-    return (groups || []).filter((g) => g.role === 'manip');
+    return (groups || []).filter((g) => g.role === 'manip' || MANIP_IDS.has(g.id));
 }
 
 export function getGazeGroup(groups) {
