@@ -119,13 +119,31 @@ export function createBrainMotor({
         return out.buffer;
     }
 
-    /** Shared stand/walk outcome on every group. Touch is additive metadata only. */
-    function outcomeForGroup(_group) {
-        return getLastMotorOutcome();
+    function scaleOutcome(outcome, scale) {
+        const base = outcome && typeof outcome === 'object' ? outcome : {};
+        const r = Math.max(-1, Math.min(1, (Number(base.reward) || 0) * scale));
+        return {
+            ...base,
+            reward: r,
+            valence: r,
+            posSum: Math.max(0, r),
+            negSum: Math.max(0, -r),
+        };
     }
 
-    function packGroupTx(group, globalState, outcome) {
-        return packGroupObservation(model, data, group, outcome, globalState);
+    function outcomeForGroup(group) {
+        const o = getLastMotorOutcome();
+        const role = group?.role;
+        const id = group?.id;
+        if (role === 'loco' || role === 'leg' || role === 'waist' || id === 'loco') {
+            return o;
+        }
+        if (role === 'manip') return scaleOutcome(o, 0.12);
+        return scaleOutcome(o, 0.08);
+    }
+
+    function packGroupTx(group, globalState, _ignored) {
+        return packGroupObservation(model, data, group, outcomeForGroup(group), globalState);
     }
 
     function applyGroupAction(group, actions) {

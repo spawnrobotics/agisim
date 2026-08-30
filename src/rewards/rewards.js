@@ -244,11 +244,11 @@ export function extractReward(model, data, opts = {}) {
     const headTerm = heightTermFromZ(
         head,
         cfg.headFloor ?? 0.12,
-        cfg.headFall ?? 0.35,
+        cfg.headFall ?? 0.20,
         cfg.headStand ?? 1.22
     );
-    const wp = cfg.wPelvisH ?? 0.5;
-    const wh = cfg.wHeadH ?? 0.5;
+    const wp = cfg.wPelvisH ?? 0.75;
+    const wh = cfg.wHeadH ?? 0.25;
     const heightTerm = clamp01((wp * pelvisTerm + wh * headTerm) / Math.max(1e-6, wp + wh));
     const uprightTerm = uprightTermFromDot(upright, cfg);
 
@@ -270,8 +270,8 @@ export function extractReward(model, data, opts = {}) {
     const dzHead = head - prevHead;
     const dzUp = Math.max(dz, dzHead, dzPelvis);
 
-    const progressScale = Math.max(1e-4, Number(cfg.progressScale) || 0.04);
-    const progressTerm = clamp01(dzUp / progressScale);
+    const progressScale = Math.max(1e-4, Number(cfg.progressScale) || 0.025);
+    const progressTerm = clamp01(dzPelvis / progressScale);
 
     const velPen = rmsArrayLocal(data.qvel, model.nv | 0);
     const ctrlPen = rmsArrayLocal(data.ctrl, model.nu | 0);
@@ -279,7 +279,7 @@ export function extractReward(model, data, opts = {}) {
     const pelvisSit = cfg.pelvisSit ?? 0.35;
     const recovering =
         (pelvis >= pelvisSit && upright >= 0.25) ||
-        (pelvis >= (cfg.pelvisFall ?? 0.12) && upright >= 0.45 && dzUp > 0);
+        (pelvis >= (cfg.pelvisFall ?? 0.12) && upright >= 0.45 && dzPelvis > 0);
 
     const onFloor =
         pelvis < (cfg.pelvisFall ?? cfg.heightFall) &&
@@ -299,13 +299,13 @@ export function extractReward(model, data, opts = {}) {
         head >= (cfg.successHead ?? cfg.headStand ?? 1.10) &&
         upright >= (cfg.successUpright ?? 0.75);
 
-    const velW = fallen ? Math.min(cfg.wVel ?? 0.01, 0.005) : (cfg.wVel ?? 0.01);
-    const ctrlW = fallen ? Math.min(cfg.wCtrl ?? 0.005, 0.002) : (cfg.wCtrl ?? 0.005);
+    const velW = fallen ? Math.min(cfg.wVel ?? 0.008, 0.004) : (cfg.wVel ?? 0.008);
+    const ctrlW = fallen ? Math.min(cfg.wCtrl ?? 0.004, 0.002) : (cfg.wCtrl ?? 0.004);
 
     let reward =
-        (cfg.wHeight ?? 0.45) * heightTerm +
-        (cfg.wUpright ?? 0.35) * uprightTerm +
-        (cfg.wProgress ?? 0.65) * progressTerm -
+        (cfg.wHeight ?? 0.40) * heightTerm +
+        (cfg.wUpright ?? 0.30) * uprightTerm +
+        (cfg.wProgress ?? 0.70) * progressTerm -
         velW * Math.min(1, velPen) -
         ctrlW * Math.min(1, ctrlPen);
 
@@ -328,7 +328,7 @@ export function extractReward(model, data, opts = {}) {
         const tiltDown = clamp01((0.15 - upright) / 0.15);
         const down = clamp01(0.45 * pelvisDown + 0.35 * headDown + 0.20 * tiltDown);
         const lift = clamp01(progressTerm);
-        const mix = (cfg.fallMix ?? 0.50) * down * (1 - 0.85 * lift);
+        const mix = (cfg.fallMix ?? 0.45) * down * (1 - 0.85 * lift);
         const floor = cfg.fallenFloor ?? -0.30;
         reward = reward * (1 - mix) + floor * mix;
     }
