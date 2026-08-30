@@ -235,17 +235,23 @@ export function extractReward(model, data, opts = {}) {
     const qwSafe = Number.isFinite(qw) ? qw : 1;
 
     const upright = quatUpDot(qwSafe, qx, qy, qz);
+    const pelvisStand = cfg.pelvisStand ?? 0.79;
+    const headStand = cfg.headStand ?? 1.22;
+    const pelvisSit = cfg.pelvisSit ?? 0.35;
+    const pFall = cfg.pelvisFall ?? cfg.heightFall ?? 0.12;
+    const hFall = cfg.headFall ?? 0.20;
+
     const pelvisTerm = heightTermFromZ(
         pelvis,
         cfg.pelvisFloor ?? 0.05,
-        cfg.pelvisFall ?? cfg.heightFall,
-        cfg.pelvisStand ?? 0.79
+        pFall,
+        pelvisStand
     );
     const headTerm = heightTermFromZ(
         head,
         cfg.headFloor ?? 0.12,
-        cfg.headFall ?? 0.20,
-        cfg.headStand ?? 1.22
+        hFall,
+        headStand
     );
     const wp = cfg.wPelvisH ?? 0.75;
     const wh = cfg.wHeadH ?? 0.25;
@@ -270,67 +276,81 @@ export function extractReward(model, data, opts = {}) {
     const dzHead = head - prevHead;
     const dzUp = Math.max(dz, dzHead, dzPelvis);
 
-    const progressScale = Math.max(1e-4, Number(cfg.progressScale) || 0.025);
+    const progressScale = Math.max(1e-4, Number(cfg.progressScale) || 0.04);
     const progressTerm = clamp01(dzPelvis / progressScale);
 
     const velPen = rmsArrayLocal(data.qvel, model.nv | 0);
     const ctrlPen = rmsArrayLocal(data.ctrl, model.nu | 0);
 
-    const pelvisSit = cfg.pelvisSit ?? 0.35;
     const recovering =
         (pelvis >= pelvisSit && upright >= 0.25) ||
-        (pelvis >= (cfg.pelvisFall ?? 0.12) && upright >= 0.45 && dzPelvis > 0);
+        (pelvis >= pFall && upright >= 0.45 && dzPelvis > 0);
 
     const onFloor =
-        pelvis < (cfg.pelvisFall ?? cfg.heightFall) &&
-        head < (cfg.headFall ?? 0.20) &&
+        pelvis < pFall &&
+        head < hFall &&
         upright < 0.15;
 
     const fallen = onFloor && !recovering;
 
+    // Height only counts when the body is actually upright
+    const postureTerm = clamp01(heightTerm * (0.35 + 0.65 * uprightTerm));
+
+    const belowStand = pelvis < pelvisStand * 0.98 || head < headStand * 0.98;
+    const riseScale = Math.max(1e-4, Number(cfg.riseScale) || 0.04);
+    const riseTerm = clamp01(belowStand ? Math.max(0, dzUp) / riseScale : 0);
+
+    const dropScale = Math.max(1e-4, Number(cfg.dropScale) || 0.03);
+    const dropTerm = (!fallen && dzPelvis < 0)
+        ? clamp01((-dzPelvis) / dropScale)
+        : 0;
+
+    const sitSpan = Math.max(1e-3, pelvisStand - pelvisSit);
+    const sitTerm = (!fallen && pelvis >= pelvisSit)
+        ? clamp01((pelvis - pelvisSit) / sitSpan)
+        : 0;
+
     const successHeight =
         cfg.successHeight ??
         (cfg.heightStand != null ? cfg.heightStand * 0.93 : undefined) ??
-        ((cfg.pelvisStand ?? 0.79) * 0.5 + (cfg.headStand ?? 1.22) * 0.5) * 0.93;
+        ((pelvisStand * 0.5 + headStand * 0.5) * 0.93);
 
     const success =
         z >= successHeight &&
-        pelvis >= (cfg.successPelvis ?? cfg.pelvisStand ?? 0.70) &&
-        head >= (cfg.successHead ?? cfg.headStand ?? 1.10) &&
+        pelvis >= (cfg.successPelvis ?? pelvisStand * 0.90) &&
+        head >= (cfg.successHead ?? headStand * 0.90) &&
         upright >= (cfg.successUpright ?? 0.75);
 
-    const velW = fallen ? Math.min(cfg.wVel ?? 0.008, 0.004) : (cfg.wVel ?? 0.008);
-    const ctrlW = fallen ? Math.min(cfg.wCtrl ?? 0.004, 0.002) : (cfg.wCtrl ?? 0.004);
+    const recoveringOrFloor = fallen || recovering || pelvis < pelvisSit;
+    const velW = recoveringOrFloor
+        ? Math.min(cfg.wVel ?? 0.008, 0.0015)
+        : (cfg.wVel ?? 0.008);
+    const ctrlW = recoveringOrFloor
+        ? Math.min(cfg.wCtrl ?? 0.004, 0.0008)
+        : (cfg.wCtrl ?? 0.004);
+
+    const wPosture = cfg.wPosture ?? 0.55;
+    const wRise = cfg.wRise ?? 0.45;
+    const wSit = cfg.wSit ?? 0.18;
+    const wUprightKeep = cfg.wUpright ?? 0.22;
+    const wDrop = cfg.wDrop ?? 0.35;
+    const wSuccess = cfg.wSuccess ?? 0.25;
 
     let reward =
-        (cfg.wHeight ?? 0.40) * heightTerm +
-        (cfg.wUpright ?? 0.30) * uprightTerm +
-        (cfg.wProgress ?? 0.70) * progressTerm -
+        wPosture * postureTerm +
+        wRise * riseTerm +
+        wSit * sitTerm +
+        wUprightKeep * uprightTerm -
+        wDrop * dropTerm -
         velW * Math.min(1, velPen) -
         ctrlW * Math.min(1, ctrlPen);
 
-    if (success) reward += cfg.wSuccess ?? 0;
-
-    if (pelvis >= pelvisSit && pelvis < (cfg.pelvisStand ?? 0.79) && !fallen) {
-        reward += 0.08 * clamp01(
-            (pelvis - pelvisSit) / Math.max(1e-3, (cfg.pelvisStand ?? 0.79) - pelvisSit)
-        );
-    }
+    if (success) reward += wSuccess;
 
     if (fallen) {
-        const pFloor = cfg.pelvisFloor ?? 0.05;
-        const pFall = cfg.pelvisFall ?? cfg.heightFall ?? 0.12;
-        const hFloor = cfg.headFloor ?? 0.12;
-        const hFall = cfg.headFall ?? 0.20;
-
-        const pelvisDown = clamp01((pFall - pelvis) / Math.max(1e-3, pFall - pFloor));
-        const headDown = clamp01((hFall - head) / Math.max(1e-3, hFall - hFloor));
-        const tiltDown = clamp01((0.15 - upright) / 0.15);
-        const down = clamp01(0.45 * pelvisDown + 0.35 * headDown + 0.20 * tiltDown);
-        const lift = clamp01(progressTerm);
-        const mix = (cfg.fallMix ?? 0.45) * down * (1 - 0.85 * lift);
-        const floor = cfg.fallenFloor ?? -0.30;
-        reward = reward * (1 - mix) + floor * mix;
+        const lift = clamp01(Math.max(riseTerm, progressTerm));
+        const floor = cfg.fallenFloor ?? -0.12;
+        reward = Math.max(floor, reward * 0.35 + 0.25 * lift + floor * 0.40);
     }
 
     reward = clamp11(reward);
