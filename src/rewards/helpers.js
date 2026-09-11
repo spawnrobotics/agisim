@@ -4,20 +4,6 @@ export function quatUpDot(qw, qx, qy, qz) {
     return Math.max(-1, Math.min(1, z));
 }
 
-export function heightTermFromZ(z, z0, z1, z2) {
-    const zz = Number(z) || 0;
-    if (zz <= z0) return 0;
-    if (zz < z1) return 0.25 * (zz - z0) / Math.max(1e-3, z1 - z0);
-    if (zz < z2) return 0.25 + 0.75 * (zz - z1) / Math.max(1e-3, z2 - z1);
-    return 1;
-}
-
-export function uprightTermFromDot(upright, cfg) {
-    const u01 = Math.max(0, Math.min(1, Number(upright) || 0));
-    const p = Math.max(0.5, Number(cfg.uprightPower) || 1);
-    return Math.pow(u01, p);
-}
-
 export function rmsArray(arr, n) {
     let s = 0;
     const m = Math.max(1, n | 0);
@@ -50,8 +36,7 @@ export function mjId2Name(mujoco, model, typeKey, id) {
     const typ = mjObjType(mujoco, typeKey);
     if (typ == null || !mujoco?.mj_id2name || id == null || id < 0) return null;
     try {
-        const name = mujoco.mj_id2name(model, typ, id);
-        return name || null;
+        return mujoco.mj_id2name(model, typ, id) || null;
     } catch (_) {
         return null;
     }
@@ -74,14 +59,7 @@ export function resolveBodyId(mujoco, model, name) {
     if (id >= 0) return id;
     try {
         if (typeof model.body === 'function') {
-            const b = model.body(name);
-            const bid = b && b.id != null ? b.id : -1;
-            if (bid >= 0) return bid;
-        }
-    } catch (_) { /* */ }
-    try {
-        if (typeof model.name2id === 'function') {
-            const bid = model.name2id('body', name);
+            const bid = model.body(name)?.id;
             if (bid >= 0) return bid;
         }
     } catch (_) { /* */ }
@@ -93,8 +71,7 @@ export function resolveSiteId(mujoco, model, name) {
     if (id >= 0) return id;
     try {
         if (typeof model.site === 'function') {
-            const s = model.site(name);
-            const sid = s && s.id != null ? s.id : -1;
+            const sid = model.site(name)?.id;
             if (sid >= 0) return sid;
         }
     } catch (_) { /* */ }
@@ -105,30 +82,17 @@ export function listBodyNames(mujoco, model, max = 80) {
     const n = Number(model?.nbody) || 0;
     const out = [];
     for (let i = 0; i < n && out.length < max; i++) {
-        const name =
-            mjId2Name(mujoco, model, 'mjOBJ_BODY', i) ||
-            (() => {
-                try {
-                    return typeof model.body === 'function' ? model.body(i)?.name : null;
-                } catch (_) {
-                    return null;
-                }
-            })();
+        let name = mjId2Name(mujoco, model, 'mjOBJ_BODY', i);
+        if (!name) {
+            try {
+                name = typeof model.body === 'function' ? model.body(i)?.name : null;
+            } catch (_) {
+                name = null;
+            }
+        }
         out.push({ id: i, name: name || `body_${i}` });
     }
     return out;
-}
-
-export function bodyZ(model, data, name) {
-    try {
-        const b = typeof model.body === 'function' ? model.body(name) : null;
-        const id = b && b.id != null ? b.id : -1;
-        if (id >= 0) {
-            const z = Number(data.xpos[id * 3 + 2]);
-            if (Number.isFinite(z)) return z;
-        }
-    } catch (_) { /* */ }
-    return null;
 }
 
 export function bodyZById(data, id) {
@@ -155,66 +119,87 @@ export function bodyLocalZ(data, bodyId, lx, ly, lz) {
     return Number.isFinite(z) ? z : null;
 }
 
-export function blendHeight(pelvis, head, cfg) {
+export function blendHeight(pelvis, head, cfg = {}) {
     const wp = cfg.wPelvisH ?? 0.5;
     const wh = cfg.wHeadH ?? 0.5;
     const s = Math.max(1e-6, wp + wh);
     return (wp * pelvis + wh * head) / s;
 }
 
+function num3(src, fallback = [0, 0, 0]) {
+    if (!Array.isArray(src) || src.length < 3) return fallback.slice();
+    return [
+        Number(src[0]) || 0,
+        Number(src[1]) || 0,
+        Number(src[2]) || 0,
+    ];
+}
+
 export function emptyOutcome() {
     return {
-        reward: 0,
         height: 0,
         pelvisHeight: 0,
         headHeight: 0,
         upright: 0,
-        heightTerm: 0,
-        uprightTerm: 0,
-        progressTerm: 0,
-        success: false,
+        gx: 0,
+        gy: 0,
+        gz: 0,
+        wz: 0,
         fallen: false,
-        posSum: 0,
-        negSum: 0,
-        valence: 0,
+        onFloor: false,
+        success: false,
+        hold: 0,
+        sway: 0,
+        holdTicks: 0,
         gene: null,
-        expression: 1,
-        source: 'reward',
+        source: 'plant',
         ts: 0,
-        actuatorRewards: null,
-        groupRewards: null,
+        cmd: [0, 0, 0],
+        headCmd: [0, 0, 0, 0],
+        vErr: [0, 0, 0],
+        vLocal: [0, 0, 0],
+        imu: null,
+        imuBySlot: null,
     };
 }
 
 export function normalizeOutcome(outcome) {
     if (!outcome || typeof outcome !== 'object') return emptyOutcome();
-
-    const reward = clamp11(outcome.reward);
-    const valence = clamp11(outcome.valence ?? reward);
-    const posSum = Math.max(0, Number(outcome.posSum) || Math.max(0, reward));
-    const negSum = Math.max(0, Number(outcome.negSum) || Math.max(0, -reward));
-
-    const out = {
-        reward,
+    const base = emptyOutcome();
+    return {
+        ...base,
+        ...outcome,
         height: Number(outcome.height) || 0,
-        pelvisHeight: Number(outcome.pelvisHeight) || 0,
+        pelvisHeight: Number(outcome.pelvisHeight ?? outcome.pelvis_z) || 0,
         headHeight: Number(outcome.headHeight) || 0,
         upright: Number(outcome.upright) || 0,
-        heightTerm: clamp01(outcome.heightTerm),
-        uprightTerm: clamp01(outcome.uprightTerm),
-        progressTerm: clamp01(outcome.progressTerm),
-        success: !!outcome.success,
+        gx: Number(outcome.gx ?? outcome.imu?.gx) || 0,
+        gy: Number(outcome.gy ?? outcome.imu?.gy) || 0,
+        gz: Number(outcome.gz ?? outcome.imu?.gz) || 0,
+        wz: Number(outcome.wz ?? outcome.imu?.wz) || 0,
         fallen: !!outcome.fallen,
-        posSum,
-        negSum,
-        valence,
+        onFloor: !!(outcome.onFloor || outcome.fallen),
+        success: false,
+        hold: clamp01(outcome.hold),
+        sway: clamp01(outcome.sway),
+        holdTicks: Math.max(0, Math.floor(Number(outcome.holdTicks) || 0)),
         gene: outcome.gene ?? null,
-        expression: clamp01(outcome.expression ?? 1),
-        source: outcome.source || 'reward',
+        source: outcome.source || 'plant',
         ts: outcome.ts || Date.now(),
+        cmd: num3(outcome.cmd),
+        headCmd: Array.isArray(outcome.headCmd)
+            ? [
+                Number(outcome.headCmd[0]) || 0,
+                Number(outcome.headCmd[1]) || 0,
+                Number(outcome.headCmd[2]) || 0,
+                Number(outcome.headCmd[3]) || 0,
+            ]
+            : [0, 0, 0, 0],
+        vErr: num3(outcome.vErr),
+        vLocal: num3(outcome.vLocal),
+        imu: outcome.imu || null,
+        imuBySlot: outcome.imuBySlot || null,
+        pelvis_z: Number(outcome.pelvis_z ?? outcome.pelvisHeight) || 0,
+        head_z: Number(outcome.head_z ?? outcome.headHeight) || 0,
     };
-
-    if (outcome.actuatorRewards) out.actuatorRewards = outcome.actuatorRewards;
-    if (outcome.groupRewards) out.groupRewards = outcome.groupRewards;
-    return out;
 }

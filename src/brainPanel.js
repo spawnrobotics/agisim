@@ -9,6 +9,27 @@ function fmt(n, d = 2) {
   return Number.isFinite(x) ? x.toFixed(d) : '—';
 }
 
+function paintImu(rewardLine, rewardFlag, rewardCard, outcome) {
+  if (!outcome || typeof outcome !== 'object') return;
+
+  rewardCard.hidden = false;
+
+  const imu = outcome.imu && typeof outcome.imu === 'object' ? outcome.imu : outcome;
+  const up = imu.upright ?? outcome.upright;
+
+  rewardLine.textContent = `up=${fmt(up)}`;
+
+  rewardFlag.textContent = outcome.onFloor
+    ? 'FLOOR'
+    : outcome.fallen
+      ? 'FALL'
+      : Number(up) >= 0.82
+        ? 'UP'
+        : '';
+  rewardCard.classList.toggle('fallen', !!(outcome.fallen || outcome.onFloor));
+  rewardCard.classList.toggle('good', Number(up) >= 0.82 && !outcome.fallen && !outcome.onFloor);
+}
+
 export function createBrainPanel(brainWS) {
   const panel = document.createElement('div');
   panel.id = 'brain-panel';
@@ -21,8 +42,8 @@ export function createBrainPanel(brainWS) {
         <div class="hint" id="brain-ws-default"></div>
         <div class="status" id="brain-status">Connecting…</div>
       </div>
-      <div class="reward-card" id="brain-reward">
-        <div class="reward-line" id="brain-reward-line">w=— hd=— h=— up=— r=—</div>
+      <div class="reward-card" id="brain-reward" hidden>
+        <div class="reward-line" id="brain-reward-line">up=—</div>
         <div class="reward-flag" id="brain-reward-flag"></div>
       </div>
     `;
@@ -92,26 +113,18 @@ export function createBrainPanel(brainWS) {
       if (isDown) connected = false;
       paintToggle();
     },
+    setImu(imu, imuBySlot) {
+      const last = rewardLine._lastOutcome || {};
+      paintImu(
+        rewardLine, rewardFlag, rewardCard,
+        imu && typeof imu === 'object'
+          ? { ...last, ...imu, imu, imuBySlot }
+          : { ...last, imuBySlot }
+      );
+    },
     setReward(outcome) {
-      if (!outcome || typeof outcome !== 'object') return;
-      const w = outcome.pelvisHeight ?? outcome.waist ?? outcome.height;
-      const hd = outcome.headHeight;
-      const h = outcome.height;
-      const up = outcome.upright;
-      const r = outcome.reward;
-      const dz = outcome.progressTerm;
-      const gene = outcome.gene ? String(outcome.gene) : '';
-      rewardLine.textContent =
-        (gene ? `${gene} ` : '') +
-        `w=${fmt(w)} hd=${fmt(hd)} h=${fmt(h)} up=${fmt(up)} r=${fmt(r)}` +
-        (Number(dz) > 0.04 ? ` ↑${fmt(dz)}` : '');
-      rewardFlag.textContent = outcome.success
-        ? 'UP'
-        : outcome.fallen
-          ? 'FALL'
-          : '';
-      rewardCard.classList.toggle('fallen', !!outcome.fallen);
-      rewardCard.classList.toggle('good', !!outcome.success || (!outcome.fallen && r > 0.35));
+      rewardLine._lastOutcome = outcome;
+      paintImu(rewardLine, rewardFlag, rewardCard, outcome);
     },
   };
 }

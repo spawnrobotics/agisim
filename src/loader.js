@@ -61,7 +61,9 @@ function meshVfsPath(file) {
     return `assets/${file}`;
 }
 
-export async function loadRobotScene(robotOrId = CONFIG.robot) {
+export async function loadRobotScene(robotOrId = CONFIG.robot, opts = {}) {
+    const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : () => { };
+
     const robot = typeof robotOrId === 'string'
         ? resolveRobot(robotOrId)
         : (robotOrId || CONFIG.robot);
@@ -74,11 +76,13 @@ export async function loadRobotScene(robotOrId = CONFIG.robot) {
     const sceneFile = robot.scene || 'scene.xml';
     const sceneUrl = `${basePath}/${sceneFile}`;
 
+    onProgress('Loading MuJoCo…', 6);
     const mujoco = await loadMujoco();
 
     try { mujoco.FS.mkdir('/working'); } catch { /* exists */ }
     try { mujoco.FS.mount(mujoco.MEMFS, { root: '.' }, '/working'); } catch { /* mounted */ }
 
+    onProgress('Fetching scene…', 14);
     const collected = await collectAssets(sceneUrl);
     await writeFile(mujoco, sceneFile, sceneUrl);
 
@@ -97,21 +101,23 @@ export async function loadRobotScene(robotOrId = CONFIG.robot) {
             more.forEach((m) => {
                 if (!written.has(m)) pending.push(m);
             });
-            continue;
-        }
-
-        if (MESH_EXT.test(file) || file.includes('/')) {
+        } else if (MESH_EXT.test(file) || file.includes('/')) {
             const vfsPath = meshVfsPath(file);
-            const url = `${basePath}/${vfsPath.replace(/^assets\//, 'assets/')}`;
-            // Prefer assets/ on disk; fall back to the path as written in XML
             try {
                 await writeFile(mujoco, vfsPath, `${basePath}/${vfsPath}`);
             } catch {
                 await writeFile(mujoco, file, `${basePath}/${file}`);
             }
         }
+
+        const loaded = written.size;
+        const known = loaded + pending.length;
+        const frac = loaded / Math.max(1, known);
+        const pct = 14 + Math.round(frac * 56);
+        onProgress(`Loading assets (${loaded}/${known})…`, pct);
     }
 
+    onProgress('Compiling model…', 74);
     const model = mujoco.MjModel.mj_loadXML(`/working/${sceneFile}`);
     if (!model) throw new Error(`[loader] mj_loadXML failed for ${sceneUrl}`);
 
@@ -125,12 +131,11 @@ export async function loadRobotScene(robotOrId = CONFIG.robot) {
         nbody: model.nbody,
     });
 
+    onProgress('Model ready', 78);
     return { mujoco, model, data, robot };
 }
 
-/** Default: robot from VITE_ROBOT / CONFIG.robot */
-export async function loadConfiguredRobot() {
-    return loadRobotScene(CONFIG.robot);
+export async function loadConfiguredRobot(opts = {}) {
+    return loadRobotScene(CONFIG.robot, opts);
 }
-
 export default loadConfiguredRobot;

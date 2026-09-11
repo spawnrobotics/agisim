@@ -1,5 +1,5 @@
 // main.js
-import { loadConfiguredRobot } from './loader.js';
+import { loadRobotScene } from './loader.js';
 import { createRenderer } from './renderer.js';
 import { createUI } from './ui.js';
 import { createJointControls } from './jointControls.js';
@@ -9,140 +9,219 @@ import { createDragControls } from './dragControls.js';
 import { createRobotHeadCamera } from './robotCamera.js';
 import { createMediaStreaming } from './mediaStreaming.js';
 import { createStreamHud } from './streamHUD.js';
-import { createSimLoop } from './simLoop.js';
-import {
-    createMotorGroups,
-    assertGroupsCoverNu,
-    getLegGroups,
-    getWaistGroup,
-    getLocoGroup,
-    getManipGroups,
-    getGazeGroup,
-} from './motorGroups.js';
+import { createSimLoop } from './loop/simLoop.js';
+import { createMicroduckPolicy } from './policies/microduckPolicy.js';
+import { createPolicyHandoff } from './policies/policyHandoff.js';
+import { createMotorGroups } from './motorGroups.js';
 import { getObsSizes } from './motorObs.js';
-import CONFIG from './config.js';
+import CONFIG, {
+    ROBOTS,
+    isDuckRobot,
+    getStoredBrainId,
+    setStoredBrainId,
+} from './config.js';
+import {
+    spawnStanding,
+    resetStanding,
+    logMotorLayout,
+} from './loop/simSetup.js';
+import { bindFollowKeys, bindActorKeys } from './inputBindings.js';
+import { clearMotorOutcome } from './rewards/rewards.js';
+import {
+    resolveBootRobotId,
+    setActiveRobot,
+    markLoadSuccess,
+    revertRobotLoad,
+    switchRobot as requestSwitchRobot,
+    ROBOT_PENDING_KEY,
+    readLocal,
+} from './robotSwitch.js';
 
-if (window.__mujocoAppStarted) {
-    console.warn('[main] App already started — skipping second instance');
-} else {
-    window.__mujocoAppStarted = true;
-    main().catch((err) => {
-        window.__mujocoAppStarted = false;
-        console.error(err);
-        document.body.innerHTML = `<pre style="color:#ff5555;padding:24px;font-family:monospace">${err.stack || err}</pre>`;
-    });
+let session = null;
+let switching = false;
+let appStarted = false;
+
+function familyOf(r) {
+    return String(r?.family || r?.id || '').toLowerCase();
 }
 
-function spawnStanding(mujoco, model, data, robot = CONFIG.robot) {
-    const s = robot?.spawn || {};
-    const quat = Array.isArray(s.quat) && s.quat.length === 4 ? s.quat : [1, 0, 0, 0];
-
-    data.qpos[0] = Number.isFinite(s.x) ? s.x : 0;
-    data.qpos[1] = Number.isFinite(s.y) ? s.y : 0;
-    data.qpos[2] = Number.isFinite(s.z) ? s.z : 0.92;
-    data.qpos[3] = quat[0];
-    data.qpos[4] = quat[1];
-    data.qpos[5] = quat[2];
-    data.qpos[6] = quat[3];
-
-    for (let i = 0; i < data.qvel.length; i++) {
-        data.qvel[i] = 0;
+function listAvailableRobots() {
+    const raw = Array.isArray(ROBOTS)
+        ? ROBOTS
+        : (ROBOTS && typeof ROBOTS === 'object' ? Object.values(ROBOTS) : []);
+    const unique = [];
+    const seen = new Set();
+    for (const r of raw) {
+        if (!r?.id) continue;
+        const fam = familyOf(r);
+        if (seen.has(fam)) continue;
+        seen.add(fam);
+        unique.push(r);
     }
-
-    mujoco.mj_forward(model, data);
+    return unique.slice(0, 2);
 }
 
-function bindFollowKeys(setFollow, resetCamera) {
-    let following = true;
-    setFollow(following);
-
-    window.addEventListener('keydown', (e) => {
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-        if (e.key === 'f' || e.key === 'F') {
-            following = !following;
-            setFollow(following);
-        }
-        if (e.key === 'r' || e.key === 'R') {
-            resetCamera();
-        }
-    });
-}
-
-function logMotorLayout(robot, model, motorGroups) {
-    const nu = model?.nu | 0;
-    const cover = assertGroupsCoverNu(motorGroups, nu);
-    const legs = getLegGroups(motorGroups);
-    const waist = getWaistGroup(motorGroups);
-    const loco = getLocoGroup(motorGroups) || waist;
-    const gaze = getGazeGroup(motorGroups);
-    const manip = getManipGroups(motorGroups);
-
-    console.log(
-        `[${robot?.id || 'robot'}] motor groups`,
-        motorGroups.map(
-            (g) =>
-                `${g.header} ${g.id} role=${g.role || '?'} n=${g.actionSize} [${g.indices.join(',')}]`
-        )
-    );
-
-    if (!cover.ok) {
-        console.warn(`[${robot?.id || 'robot'}] actuator cover failed:`, cover.reason, {
-            nu,
-            sum: motorGroups.reduce((s, g) => s + (g.actionSize | 0), 0),
-        });
-    } else {
-        console.log(`[${robot?.id || 'robot'}] actuator cover ok nu=${nu}`);
-    }
-
-    if (!legs.length && !loco) {
-        console.warn(`[${robot?.id || 'robot'}] missing loco group`, {
-            groups: motorGroups.map((g) => g.id),
-            roles: motorGroups.map((g) => g.role),
-        });
-    } else {
-        console.log(
-            `[${robot?.id || 'robot'}] loco`,
-            (loco || waist)?.header,
-            `n=${(loco || waist)?.actionSize}`,
-            '| legs',
-            legs.map((g) => `${g.header}:${g.actionSize}`).join(' ') || 'via loco'
-        );
-    }
-
-    if (gaze) {
-        console.log(`[${robot?.id || 'robot'}] gaze ${gaze.header} n=${gaze.actionSize}`);
-    }
-    if (manip.length) {
-        console.log(
-            `[${robot?.id || 'robot'}] manip`,
-            manip.map((g) => `${g.header}:${g.actionSize}`).join(' ')
-        );
-    }
-
-    return { cover, legs, waist, loco, gaze, manip };
-}
-
-async function main() {
-    document.getElementById('brain-panel')?.remove();
-    document.getElementById('control-panel')?.remove();
-    document.getElementById('joint-controls')?.remove();
-    document.getElementById('stream-hud')?.remove();
-
+function clearStoredBrainId() {
     try {
         localStorage.removeItem('brainWsBase');
+        localStorage.removeItem(CONFIG.storage?.brainId || 'brainId');
+        window.brainId = null;
     } catch (_) { }
+    try { setStoredBrainId(null); } catch (_) { }
+}
 
-    const { mujoco, model, data, robot } = await loadConfiguredRobot();
+function setBoot(msg, pct) {
+    const root = document.getElementById('boot-loader') || restoreBoot();
+    root.classList.remove('hidden');
+    root.setAttribute('aria-busy', 'true');
+    const status = document.getElementById('boot-status');
+    const bar = document.getElementById('boot-bar');
+    if (status && msg) status.textContent = msg;
+    if (bar && Number.isFinite(pct)) {
+        bar.style.width = `${Math.max(4, Math.min(100, pct))}%`;
+    }
+}
+
+function restoreBoot() {
+    let root = document.getElementById('boot-loader');
+    if (root) return root;
+    root = document.createElement('div');
+    root.id = 'boot-loader';
+    root.className = 'boot-loader';
+    root.setAttribute('aria-busy', 'true');
+    root.setAttribute('aria-live', 'polite');
+    root.innerHTML = `
+      <div class="boot-card">
+        <div class="boot-spinner" aria-hidden="true"></div>
+        <div class="boot-title">AGI SIM</div>
+        <div class="boot-status" id="boot-status">Loading model…</div>
+        <div class="boot-track" aria-hidden="true">
+          <div class="boot-bar" id="boot-bar"></div>
+        </div>
+      </div>`;
+    document.body.prepend(root);
+    return root;
+}
+
+function hideBoot() {
+    const root = document.getElementById('boot-loader');
+    if (!root) return;
+    root.classList.add('hidden');
+    root.setAttribute('aria-busy', 'false');
+}
+
+function stripPanels() {
+    for (const id of ['brain-panel', 'control-panel', 'joint-controls', 'stream-hud']) {
+        document.getElementById(id)?.remove();
+    }
+}
+
+function resetBrainConnection(brainWS) {
+    clearStoredBrainId();
+    if (!brainWS) return;
+    try {
+        brainWS.resetConnection?.({ clearBrainId: true });
+        return;
+    } catch (_) { }
+    try { brainWS.disconnect?.(); } catch (_) { }
+}
+
+async function disposeSession(s) {
+    if (!s) return;
+    try { s.loop?.stop?.(); } catch (_) { }
+    try { s.handoff?.stop?.(); } catch (_) { }
+    try { s.unbindKeys?.(); } catch (_) { }
+    try { s.drag?.dispose?.(); } catch (_) { }
+    try { s.media?.dispose?.(); } catch (_) { }
+    try { s.hud?.dispose?.(); } catch (_) { }
+    try { s.headCam?.dispose?.(); } catch (_) { }
+    try { s.renderer?.dispose?.(); } catch (_) { }
+    try { s.controls?.dispose?.(); } catch (_) { }
+    resetBrainConnection(s.brainWS);
+    try { clearMotorOutcome(); } catch (_) { }
+    try { s.data?.delete?.(); } catch (_) { }
+    try { s.model?.delete?.(); } catch (_) { }
+    stripPanels();
+}
+
+async function switchRobot(id) {
+    return requestSwitchRobot(id, {
+        session,
+        switching,
+        setSwitching: (v) => { switching = v; },
+        setSession: (s) => { session = s; },
+        setBoot,
+        disposeSession,
+        clearStoredBrainId,
+    });
+}
+
+async function boot() {
+    stripPanels();
+    clearStoredBrainId();
+
+    const requestedId = resolveBootRobotId();
+    const robot = setActiveRobot(requestedId, { persist: false });
+    const duck = typeof isDuckRobot === 'function'
+        ? isDuckRobot(robot)
+        : familyOf(robot).includes('duck');
+
+    setBoot(`Loading ${robot.name || robot.id}…`, 4);
+
+    let loaded;
+    try {
+        loaded = await loadRobotScene(robot, { onProgress: setBoot });
+    } catch (err) {
+        const reverted = await revertRobotLoad(robot.id, err, { setBoot });
+        if (reverted) return;
+        throw err;
+    }
+
+    markLoadSuccess(robot.id);
+    const { mujoco, model, data } = loaded;
+
+    setBoot('Spawning robot…', 80);
     spawnStanding(mujoco, model, data, robot);
 
     const motorGroups = createMotorGroups(model);
     const actionSizes = motorGroups.map((g) => g.actionSize);
     const obsSizes = getObsSizes(motorGroups);
-    const layout = logMotorLayout(robot, model, motorGroups);
+    logMotorLayout(robot, model, motorGroups);
 
+    const policyOwnsCtrl = duck && !CONFIG.policyToBrain;
+    const p = robot.policy || {};
+
+    const loopRef = { current: null };
+    const jointsRef = { current: null };
+    const brainWSRef = { current: null };
+
+    let duckPolicy = null;
+    if (duck) {
+        setBoot('Preparing plant…', 84);
+        duckPolicy = await createMicroduckPolicy({
+            model,
+            data,
+            walkUrl: p.walk,
+            standUrl: p.stand,
+            sitstandUrl: p.sitstand,
+            groundPickUrl: p.groundPick,
+            kickLeftUrl: p.kickLeft,
+            kickRightUrl: p.kickRight,
+            rollerUrl: p.roller,
+            rollerCrouchUrl: p.rollerCrouch,
+            rouladeUrl: p.roulade,
+            actionScale: p.actionScale ?? 1.0,
+            torsoBodyName: robot.torsoBody || 'trunk_base',
+            floorPelvis: p.floorPelvis ?? 0.07,
+            floorUpright: p.floorUpright ?? 0.45,
+            standPelvis: p.standPelvis ?? 0.10,
+            standUpright: p.standUpright ?? 0.70,
+        });
+        resetStanding(mujoco, model, data, { robot, duckPolicy, startCmd: [0, 0, 0] });
+    }
+
+    setBoot('Building renderer…', 90);
     const {
-        scene,
         camera,
         renderer,
         controls,
@@ -152,7 +231,8 @@ async function main() {
         render,
         setFollow,
         resetCamera,
-    } = createRenderer(model, data, mujoco);
+        scene,
+    } = createRenderer(model, data, mujoco, robot);
 
     const headCam = createRobotHeadCamera({
         scene,
@@ -178,14 +258,62 @@ async function main() {
     });
 
     const joints = createJointControls({ mujoco, model, data });
+    jointsRef.current = joints;
 
     const brainPanelRef = {
         setStatus: () => { },
         setReward: () => { },
+        setImu: () => { },
     };
-
+    const handoffRef = { current: null };
     let media = null;
     let hud = null;
+
+    setBoot('Connecting systems…', 94);
+
+    async function holdStandFrames(frames = 12) {
+        const ws = brainWSRef.current;
+        ws?.setApplyRx?.(false);
+        ws?.setTxEnabled?.(false);
+        ws?.stopAllPlayback?.();
+        if (duckPolicy?.infer && duckPolicy.hasSessions?.()) {
+            for (let i = 0; i < frames; i++) {
+                try { await duckPolicy.infer(); } catch (err) {
+                    console.warn('[main] stand hold infer failed', err);
+                    break;
+                }
+                jointsRef.current?.syncFromData?.();
+                ws?.captureWalkCtrl?.();
+                ws?.applyWalkCtrl?.();
+            }
+        } else {
+            ws?.captureWalkCtrl?.();
+            ws?.applyWalkCtrl?.();
+        }
+    }
+
+    async function applyStandPolicy() {
+        const ws = brainWSRef.current;
+        ws?.setApplyRx?.(false);
+        ws?.setTxEnabled?.(false);
+        ws?.stopAllPlayback?.();
+
+        const snap = resetStanding(mujoco, model, data, {
+            robot,
+            duckPolicy,
+            joints: jointsRef.current,
+            loop: loopRef.current,
+            startCmd: [0, 0, 0],
+        });
+
+        if (duck && duckPolicy?.hasSessions?.()) await holdStandFrames(16);
+
+        jointsRef.current?.syncFromData?.();
+        loopRef.current?.resetStandingPlant?.();
+        ws?.captureWalkCtrl?.();
+        ws?.applyWalkCtrl?.();
+        return snap;
+    }
 
     const brainWS = createBrainWS({
         model,
@@ -195,41 +323,26 @@ async function main() {
         obsSizes,
         visualCount: CONFIG.visualCount ?? 1,
         auditoryCount: CONFIG.auditoryCount ?? 1,
+        applyRx: CONFIG.applyRx,
         onCtrlChanged: () => joints.syncFromData(),
         onStatus: (msg, color) => brainPanelRef.setStatus(msg, color),
         onReady: (msg) => {
-            if (msg?.motorCount != null && msg.motorCount !== motorGroups.length) {
-                console.warn('[main] motorCount mismatch', {
-                    robot: robot?.id,
-                    server: msg.motorCount,
-                    local: motorGroups.length,
-                });
-            }
-            if (Array.isArray(msg?.actionSizes)) {
-                const same =
-                    msg.actionSizes.length === actionSizes.length &&
-                    msg.actionSizes.every((n, i) => Number(n) === actionSizes[i]);
-                if (!same) {
-                    console.warn('[main] actionSizes mismatch', {
-                        robot: robot?.id,
-                        server: msg.actionSizes,
-                        local: actionSizes,
-                    });
-                }
-            }
-            if (Array.isArray(msg?.obsSizes)) {
-                const sameObs =
-                    msg.obsSizes.length === obsSizes.length &&
-                    msg.obsSizes.every((n, i) => Number(n) === obsSizes[i]);
-                if (!sameObs) {
-                    console.warn('[main] obsSizes mismatch', {
-                        robot: robot?.id,
-                        server: msg.obsSizes,
-                        local: obsSizes,
-                    });
-                }
-            }
-            media?.syncStreaming();
+            brainWS.setApplyRx?.(false);
+            brainWS.stopAllPlayback?.();
+            brainWS.setTxEnabled?.(false);
+            console.log('[main] ws ready', {
+                robot: robot.id,
+                brainId: getStoredBrainId(),
+                applyRx: brainWS.isApplyRx?.(),
+                policyToBrain: CONFIG.policyToBrain,
+                motors: motorGroups.map((g) => `${g.header}:${g.id}:${g.actionSize}`),
+                serverMotors: msg?.motorCount,
+            });
+            void applyStandPolicy().then(() => {
+                brainWS.releaseResetHold?.();
+                brainWS.startLoop?.();
+                media?.syncStreaming();
+            });
         },
         onVideoBuffer: (buf) => {
             hud?.showBrainOverlay(true);
@@ -237,6 +350,19 @@ async function main() {
         },
         onAudioBuffer: (samples) => media?.playAudioImmediately(samples),
     });
+    brainWSRef.current = brainWS;
+
+    const handoff = createPolicyHandoff({
+        duckPolicy,
+        brainWS,
+        warmupMs: 12000,
+        minUpright: 0.65,
+        holdOkMs: 2000,
+        autoTakeover: false,
+        onPhase: (phase) =>
+            brainPanelRef.setStatus?.(`actor: ${phase}`, phase === 'brain' ? '#88ff88' : '#ffcc66'),
+    });
+    handoffRef.current = handoff;
 
     media = createMediaStreaming({
         getHeadCam: () => headCam,
@@ -258,21 +384,39 @@ async function main() {
     hud.paintVideo?.(media.isVideoEnabled());
     hud.paintAudio?.(media.isAudioEnabled());
 
+    if (duck) {
+        setBoot('Standing up…', 97);
+        await applyStandPolicy();
+    }
+
     const ui = createUI({
         mujoco,
         model,
         data,
+        robots: listAvailableRobots(),
+        activeRobotId: robot.id,
+        onSelectRobot: (id) => switchRobot(id),
         onCtrlChanged: () => joints.syncFromData(),
-        onResume: () => {
-            brainWS.sendZeroActionSequence();
-        },
+        onResume: () => { void applyStandPolicy(); },
+        onReset: () => applyStandPolicy().then(async () => {
+            handoff.forceDemo?.();
+            brainWS.setApplyRx?.(false);
+            brainWS.setTxEnabled?.(false);
+            brainWS.stopAllPlayback?.();
+            brainWS.resetMotorSeed?.();
+            brainWS.applyWalkCtrl?.();
+            brainWS.sendResetPlant?.();
+            await holdStandFrames(8);
+            brainWS.releaseResetHold?.();
+        }),
     });
 
     const brainPanel = createBrainPanel(brainWS);
     brainPanelRef.setStatus = brainPanel.setStatus;
     brainPanelRef.setReward = brainPanel.setReward;
+    brainPanelRef.setImu = brainPanel.setImu;
 
-    bindFollowKeys(setFollow, resetCamera);
+    const unbindFollow = bindFollowKeys(setFollow, resetCamera);
 
     const loop = createSimLoop({
         mujoco,
@@ -288,19 +432,103 @@ async function main() {
         brainPanelRef,
         robot,
         motorGroups,
+        duckPolicy,
+        handoff,
+        onCtrlChanged: () => joints.syncFromData(),
+        rewardOpts: {
+            cmd: Array.isArray(robot.cmd) ? robot.cmd.slice() : [0, 0, 0],
+            headCmd: robot?.headCmd || [0, 0, 0, 0],
+            dt: 1 / (p.hz || CONFIG.policyHz || CONFIG.motorFps || 50),
+        },
+        curriculumOpts: {
+            task: robot?.task || (policyOwnsCtrl ? 'walk' : 'stand'),
+        },
     });
-    loop.start();
+    loopRef.current = loop;
 
+    const unbindActor = bindActorKeys(duckPolicy, loop, handoff);
+
+    handoff.start();
+    loop.start();
     brainWS.connect();
 
-    window.addEventListener('beforeunload', () => {
-        loop.stop();
-        drag.dispose();
-        media?.dispose();
-        hud?.dispose();
-        headCam?.dispose();
-        brainWS.disconnect();
-        data.delete();
-        model.delete();
+    session = {
+        robot,
+        mujoco,
+        model,
+        data,
+        renderer,
+        controls,
+        drag,
+        headCam,
+        media,
+        hud,
+        brainWS,
+        handoff,
+        loop,
+        duckPolicy,
+        unbindKeys() {
+            try { unbindFollow?.(); } catch (_) { }
+            try { unbindActor?.(); } catch (_) { }
+        },
+    };
+
+    setBoot('Ready', 100);
+    hideBoot();
+    switching = false;
+
+    console.log('[main] ready', {
+        robot: robot.id,
+        duck,
+        nq: model.nq,
+        nu: model.nu,
+        nbody: model.nbody,
+        motors: motorGroups.map((g) => `${g.header}:${g.id}:${g.actionSize}`),
+    });
+
+    if (duck && duckPolicy?.loadSessions) {
+        void duckPolicy.loadSessions({
+            walkUrl: p.walk,
+            standUrl: p.stand,
+            onProgress: (msg, pct) => console.log('[main] policy', msg, pct),
+        }).then(async (loaded) => {
+            if (loaded?.walk || loaded?.stand) {
+                await applyStandPolicy();
+                brainWS.releaseResetHold?.();
+            }
+        }).catch((err) => {
+            console.warn('[main] onnx skipped', err);
+        });
+    }
+}
+
+if (window.__mujocoAppStarted) {
+    console.warn('[main] App already started — skipping second instance');
+} else {
+    window.__mujocoAppStarted = true;
+    appStarted = true;
+    boot().catch(async (err) => {
+        const failedId = CONFIG.robot?.id || readLocal(ROBOT_PENDING_KEY);
+        const reverted = await revertRobotLoad(failedId, err, { setBoot });
+        window.__mujocoAppStarted = false;
+        appStarted = false;
+        switching = false;
+        if (reverted) return;
+        console.error(err);
+        document.body.innerHTML = `<pre style="color:#ff5555;padding:24px;font-family:monospace">${err.stack || err}</pre>`;
     });
 }
+
+window.addEventListener('beforeunload', () => {
+    if (!appStarted && !session) return;
+    const s = session;
+    session = null;
+    try { s?.loop?.stop?.(); } catch (_) { }
+    try { s?.drag?.dispose?.(); } catch (_) { }
+    try { s?.media?.dispose?.(); } catch (_) { }
+    try { s?.hud?.dispose?.(); } catch (_) { }
+    try { s?.headCam?.dispose?.(); } catch (_) { }
+    try { s?.brainWS?.disconnect?.(); } catch (_) { }
+    try { s?.data?.delete?.(); } catch (_) { }
+    try { s?.model?.delete?.(); } catch (_) { }
+});

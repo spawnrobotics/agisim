@@ -1,4 +1,4 @@
-// jointControls.js - MuJoCo joint / actuator control panel
+// jointControls.js
 
 export function createJointControls({ mujoco, model, data }) {
     const panel = document.createElement('div');

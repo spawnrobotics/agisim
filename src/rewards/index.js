@@ -1,24 +1,26 @@
 // rewards/index.js
 export {
     extractReward,
+    extractReward as extractStandUpReward,
+    extractDuckReward,
+    extractDuckStandReward,
+    extractDuckWalkReward,
+    resetDuckRewardState,
+    extractG1Reward,
+    extractG1StandReward,
+    extractG1WalkReward,
+    resetG1RewardState,
     getLastMotorOutcome,
     setLastMotorOutcome,
     clearMotorOutcome,
-    packJointsWithOutcome,
     resolveAdvantageFromOutcome,
     outcomeToJsonMessage,
     outcomeToStimPayload,
+    outcomeToStimAmount,
     readStandHeights,
     REWARD_DEFAULTS,
     STANDUP_REWARD_DEFAULTS,
     MOTOR_OUTCOME_EXTRA,
     createRewardCurriculum,
     createTouchOutcome,
-    GENE_ORDER,
 } from './rewards.js';
-
-export { extractReward as extractStandUpReward } from './rewards.js';
-
-export { meanActuatorReward } from './geneReward.js';
-
-export { geneExpression } from './genes.js';

@@ -8,7 +8,7 @@ import {
 } from './utils.js';
 
 const LAYER_DEFAULT = 0;
-const LAYER_HEAD_SELF = 1; 
+const LAYER_HEAD_SELF = 1;
 
 const mjGEOM_PLANE = 0;
 const mjGEOM_HFIELD = 1;
@@ -19,6 +19,32 @@ const mjGEOM_CYLINDER = 5;
 const mjGEOM_BOX = 6;
 const mjGEOM_MESH = 7;
 const COLLISION_GROUP_MIN = 3;
+
+const FOLLOW_LERP = 0.18;
+
+const DEFAULT_VIEW_CAM = {
+    offset: [0.48, 0.28, 0.36],
+    lookAtZ: 0.08,
+    minDistance: 0.18,
+    maxDistance: 4,
+    fov: 50,
+};
+
+function viewCamFromOptions(options = {}) {
+    const vc = options.viewCam || {};
+    const offset = vc.offset || DEFAULT_VIEW_CAM.offset;
+    return {
+        offset: {
+            x: offset[0] ?? offset.x ?? DEFAULT_VIEW_CAM.offset[0],
+            y: offset[1] ?? offset.y ?? DEFAULT_VIEW_CAM.offset[1],
+            z: offset[2] ?? offset.z ?? DEFAULT_VIEW_CAM.offset[2],
+        },
+        lookAtZ: vc.lookAtZ ?? vc.lookAtHeight ?? DEFAULT_VIEW_CAM.lookAtZ,
+        minDistance: vc.minDistance ?? DEFAULT_VIEW_CAM.minDistance,
+        maxDistance: vc.maxDistance ?? DEFAULT_VIEW_CAM.maxDistance,
+        fov: vc.fov ?? DEFAULT_VIEW_CAM.fov,
+    };
+}
 
 function readCString(names, start) {
     if (names == null || start == null || start < 0) return '';
@@ -117,17 +143,26 @@ function isCollisionOnly(model, g) {
     return false;
 }
 
+function frameRobot(camera, controls, origin, viewCam) {
+    const o = origin || { x: 0, y: 0, z: 0 };
+    const off = viewCam.offset;
+    camera.position.set(o.x + off.x, o.y + off.y, o.z + off.z);
+    controls.target.set(o.x, o.y + viewCam.lookAtZ, o.z);
+    controls.update();
+}
+
 export function createRenderer(model, data, mujoco, options = {}) {
+    const viewCam = viewCamFromOptions(options);
+
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a1a2e);
 
     const camera = new THREE.PerspectiveCamera(
-        45,
+        viewCam.fov,
         window.innerWidth / window.innerHeight,
         0.01,
         100
     );
-    camera.position.set(2.8, 1.6, 2.8);
     camera.layers.enable(LAYER_DEFAULT);
     camera.layers.enable(LAYER_HEAD_SELF);
 
@@ -140,13 +175,12 @@ export function createRenderer(model, data, mujoco, options = {}) {
     document.body.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.target.set(0, 0.85, 0);
     controls.enableDamping = true;
-    controls.update();
+    controls.minDistance = viewCam.minDistance;
+    controls.maxDistance = viewCam.maxDistance;
+    frameRobot(camera, controls, { x: 0, y: 0, z: 0 }, viewCam);
 
     let followRobot = true;
-    const FOLLOW_LERP = 0.18;
-    const LOOK_AT_HEIGHT = 0;
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0x2a2a3a, 0.85));
     scene.add(new THREE.AmbientLight(0xffffff, 0.25));
@@ -278,7 +312,7 @@ export function createRenderer(model, data, mujoco, options = {}) {
 
         if (followRobot && bodyGroups[1]) {
             const target = bodyGroups[1].position.clone();
-            target.y += LOOK_AT_HEIGHT;
+            target.y += viewCam.lookAtZ;
             controls.target.lerp(target, FOLLOW_LERP);
         }
     }
@@ -293,11 +327,11 @@ export function createRenderer(model, data, mujoco, options = {}) {
     }
 
     function resetCamera() {
-        if (!bodyGroups[1]) return;
-        const p = bodyGroups[1].position;
-        camera.position.set(p.x + 2.8, p.y + 1.6, p.z + 2.8);
-        controls.target.set(p.x, p.y + LOOK_AT_HEIGHT, p.z);
-        controls.update();
+        if (!bodyGroups[1]) {
+            frameRobot(camera, controls, { x: 0, y: 0, z: 0 }, viewCam);
+            return;
+        }
+        frameRobot(camera, controls, bodyGroups[1].position, viewCam);
     }
 
     function configureHeadCamera(headCam) {

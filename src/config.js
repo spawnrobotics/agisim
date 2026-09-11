@@ -1,102 +1,19 @@
-// config.js - Mujoco Brain / WebSocket config
-const ROBOTS = {
-    g1: {
-        id: 'g1',
-        name: 'Unitree G1',
-        basePath: '/unitree_g1',
-        scene: 'scene.xml',
-        spawn: {
-            x: 0,
-            y: 0,
-            z: 0.92,
-            quat: [1, 0, 0, 0], // wxyz
-        },
-        torsoBody: 'torso_link',
-        headBody: 'head_link',
-        headSite: 'imu_in_torso',
-        chestAxis: 'x',
-        headLocal: { x: 0.0039635, y: 0, z: 0.38 },
-        headCam: {
-            position: [0.06, 0.4, 0],
-            rotation: [-0.18, -Math.PI / 2, 0],
-            debug: false,
-        },
-        drag: { stiffness: 400, damping: 25, maxForce: 300 },
-        stand: {
-            wPosture: 0.55,
-            wRise: 0.45,
-            wSit: 0.18,
-            wUpright: 0.22,
-            wDrop: 0.35,
-            wSuccess: 0.25,
-            wVel: 0.006,
-            wCtrl: 0.003,
-            riseScale: 0.04,
-            dropScale: 0.03,
-            progressScale: 0.04,
-            fallenFloor: -0.12,
-            fallMix: 0.25,
-        },
-    },
-    microduck: {
-        id: 'microduck',
-        name: 'MicroDuck',
-        basePath: '/microduck/robot/microduck',
-        scene: 'scene.xml',
-        spawn: {
-            x: 0,
-            y: 0,
-            z: 0.12,
-            quat: [1, 0, 0, 0],
-        },
-        torsoBody: 'trunk_base',
-        headBody: 'jaw_soft',
-        headCam: {
-            position: [.02, -0.08, 0],
-            rotation: [Math.PI / 2, Math.PI, Math.PI / 2],
-            debug: false,
-        },
-        headSite: 'head_camera',
-        waistYawJoint: 'head_yaw',
-        chestAxis: 'x',
-        headLocal: { x: 0, y: 0, z: 0.08 },
-        drag: { stiffness: 40, damping: 8, maxForce: 15 },
-        stand: {
-            pelvisFloor: 0.02,
-            pelvisFall: 0.06,
-            pelvisStand: 0.12,
-            headFloor: 0.04,
-            headFall: 0.08,
-            headStand: 0.20,
-            successPelvis: 0.10,
-            successHead: 0.16,
-            successUpright: 0.75,
-            sideUpright: 0.45,
-            fallUpright: 0.25,
-        },
-        geneOpts: {
-            limits: { wUpright: 0.5, wSide: 0.9 },
-            roll: { pelvisLo: 0.03, pelvisHi: 0.10 },
-            quad: {
-                pelvisLo: 0.04,
-                pelvisHi: 0.10,
-                headLo: 0.06,
-                headHi: 0.16,
-            },
-            crawl: { pelvisLo: 0.04, pelvisHi: 0.10, forwardScale: 0.015 },
-        },
-    },
-};
-
-function resolveRobot(raw) {
-    const key = String(raw || 'g1').trim().toLowerCase();
-    return ROBOTS[key] || ROBOTS.g1;
-}
+import {
+    ROBOTS,
+    DEFAULT_ROBOT_ID,
+    resolveRobot,
+    isDuckRobot,
+} from './robots/index.js';
 
 function envBool(key, fallback) {
     const v = import.meta.env[key];
     if (v === undefined || v === '') return fallback;
     return v === 'true' || v === '1';
+}
+
+function envNum(key, fallback) {
+    const n = Number(import.meta.env[key]);
+    return Number.isFinite(n) ? n : fallback;
 }
 
 function envInt(key, fallback) {
@@ -123,18 +40,26 @@ function clampCount(v, fallback = 1) {
 }
 
 const CONFIG = {
-    robot: resolveRobot(import.meta.env.VITE_ROBOT),
+    robot: resolveRobot(import.meta.env.VITE_ROBOT || DEFAULT_ROBOT_ID),
     wsBase: import.meta.env.VITE_BRAIN_WS_BASE || 'ws://127.0.0.1:3000/ws',
 
     frameSize: envInt('VITE_FRAME_SIZE', 32),
     motorFps: envInt('VITE_MOTOR_FPS', 30),
     videoFps: envInt('VITE_VIDEO_FPS', 10),
 
+    policyHz: envInt('VITE_POLICY_HZ', 50),
+    playbackRate: envNum('VITE_PLAYBACK_RATE', .25),
+    maxStepsPerFrame: envInt('VITE_MAX_STEPS_PER_FRAME', 20),
+
+    /** Brain motor packets write data.ctrl. */
+    applyRx: envBool('VITE_APPLY_RX', false),
+    /** ONNX joint targets are forwarded to the brain; do not leave them on data.ctrl. */
+    policyToBrain: envBool('VITE_POLICY_TO_BRAIN', false),
+
     visualCount: clampCount(envInt('VITE_VISUAL_COUNT', 1)),
     auditoryCount: clampCount(envInt('VITE_AUDITORY_COUNT', 1)),
     motorCount: clampCount(envInt('VITE_MOTOR_COUNT', 1)),
 
-    /** Optional explicit per-instance sizes from env (comma-separated). */
     frameSizes: envIntList('VITE_FRAME_SIZES'),
     actionSizes: envIntList('VITE_ACTION_SIZES'),
     obsSizes: envIntList('VITE_OBS_SIZES'),
@@ -172,18 +97,6 @@ export function getWsUrl(brainId = null) {
     return `${base}?key=${encodeURIComponent(id)}`;
 }
 
-/**
- * @param {object} [opts]
- * @param {string|null} [opts.brainId]
- * @param {number} [opts.actionSize]       primary motor (MOT1) write width
- * @param {number[]} [opts.actionSizes]    per-motor-cortex action widths
- * @param {number[]} [opts.obsSizes]       per-motor-cortex observation widths
- * @param {number} [opts.motorCount]
- * @param {number} [opts.visualCount]
- * @param {number} [opts.auditoryCount]
- * @param {number} [opts.frameSize]
- * @param {number[]} [opts.frameSizes]
- */
 export function getJoinPayload({
     brainId,
     actionSize,
@@ -269,5 +182,12 @@ export function setStoredBrainId(id) {
         }
     } catch (_) { }
 }
-export { ROBOTS, resolveRobot };
+
+export {
+    ROBOTS,
+    DEFAULT_ROBOT_ID,
+    resolveRobot,
+    isDuckRobot,
+};
+
 export default CONFIG;

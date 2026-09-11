@@ -1,13 +1,12 @@
 // brainMotor.js
+
 import CONFIG from './config.js';
-import {
-    getLastMotorOutcome,
-    resolveAdvantageFromOutcome,
-} from './rewards/rewards.js';
+import { getLastMotorOutcome } from './rewards/rewards.js';
 import { createTouchOutcome } from './rewards/touch.js';
 import {
     createMotorGroups,
     getLegGroups,
+    getHipGroups,
     getWaistGroup,
     getLocoGroup,
     getManipGroups,
@@ -18,12 +17,86 @@ import {
     packGroupObservation,
     packAllGroupObservations,
     readGlobalMotorState,
-    obsSizeForGroup,
     getObsSizes,
-    GLOBAL_OBS_N,
-    LOCAL_PLANES,
-    OUTCOME_OBS_N,
+    limbImuForGroup,
 } from './motorObs.js';
+import { outcomeForGroup } from './motorOutcomeGroups.js';
+import { createBrainMotorRx, packHeader } from './brainMotorRx.js';
+
+const WALK_RESET_VX = 0.22;
+
+function actorLabel(applyRx) {
+    if (CONFIG.policyToBrain) return 'onnx';
+    return applyRx ? 'brain' : 'onnx';
+}
+
+function liveOutcome(policyAction, applyRx) {
+    const base = getLastMotorOutcome() || {};
+    const outcome = { ...base };
+    if (!Array.isArray(outcome.cmd) || outcome.cmd.length < 3) {
+        outcome.cmd = [WALK_RESET_VX, 0, 0];
+    }
+    if (policyAction) {
+        outcome.policyAction = policyAction;
+        outcome.actor = actorLabel(applyRx);
+    }
+    return outcome;
+}
+
+function walkingResetOutcome() {
+    return {
+        hold: 1,
+        sway: 0,
+        holdTicks: 0,
+        fallen: false,
+        onFloor: false,
+        success: false,
+        vErr: [0, 0, 0],
+        vLocal: [0, 0, 0],
+        cmd: [WALK_RESET_VX, 0, 0],
+        headCmd: [0, 0, 0, 0],
+        actor: 'reset',
+        policyAction: null,
+        source: 'plant-reset-walk',
+        gene: 'forward',
+    };
+}
+
+function logGroupImus(model, data, groups) {
+    const rows = (groups || []).map((g) => {
+        const imu = limbImuForGroup(model, data, g);
+        return {
+            header: g.header,
+            id: g.id,
+            role: g.role,
+            acts: g.actionSize,
+            imuBody: g.imuBody || null,
+            imuSite: g.imuSite || null,
+            mapped: !!(g.imuBody || g.imuSite),
+            resolved: !imu.missing,
+            bodyId: imu.bodyId,
+            siteId: imu.siteId,
+            upright: imu.upright,
+            gx: imu.gx,
+            gy: imu.gy,
+            wz: imu.wz,
+        };
+    });
+    console.log('[BrainMotor] group IMU', rows);
+    const missingMap = rows.filter((r) => !r.mapped);
+    const missingBody = rows.filter((r) => r.mapped && !r.resolved);
+    if (missingMap.length) {
+        console.warn('[BrainMotor] groups without IMU target', missingMap.map((r) => r.id));
+    }
+    if (missingBody.length) {
+        console.warn('[BrainMotor] IMU body/site not in model', missingBody.map((r) => ({
+            id: r.id,
+            imuBody: r.imuBody,
+            imuSite: r.imuSite,
+        })));
+    }
+    return rows;
+}
 
 export function createBrainMotor({
     model,
@@ -34,6 +107,7 @@ export function createBrainMotor({
     groups: groupsOverride = null,
     enableTouch = false,
     extractOpts = {},
+    applyRx: applyRxInit = CONFIG.applyRx,
 }) {
     const groups = (groupsOverride?.length
         ? groupsOverride
@@ -47,6 +121,7 @@ export function createBrainMotor({
 
     const locoGroup = getLocoGroup(groups);
     const waistGroup = getWaistGroup(groups) || locoGroup;
+    const hipGroups = typeof getHipGroups === 'function' ? getHipGroups(groups) : [];
     const legGroups = getLegGroups(groups);
     const manipGroups = getManipGroups(groups);
     const gazeGroup = getGazeGroup(groups);
@@ -59,12 +134,7 @@ export function createBrainMotor({
         });
     }
 
-    if (!legGroups.length || !waistGroup) {
-        console.warn('[BrainMotor] missing loco grouping', {
-            ids: groups.map((g) => g.id),
-            roles: groups.map((g) => g.role),
-        });
-    }
+    logGroupImus(model, data, groups);
 
     const MOTOR_INTERVAL_MS = 1000 / (CONFIG.motorFps || 20);
     const MOTOR_LOG = false;
@@ -74,25 +144,12 @@ export function createBrainMotor({
 
     let lastMotorSend = 0;
     let motorTimer = null;
-
     let txCount = 0;
-    let rxCount = 0;
     let lastTxLogAt = 0;
-    let lastRxLogAt = 0;
-
-    /** @type {Map<string, { queue: Float32Array[]|null, index: number, timer: any, seqId: number }>} */
-    const play = new Map();
-    for (const g of groups) {
-        play.set(g.header, {
-            queue: null,
-            index: 0,
-            timer: null,
-            seqId: 0,
-        });
-    }
-
-    const headerToGroup = new Map();
-    for (const g of groups) headerToGroup.set(g.header, g);
+    let txEnabled = true;
+    let policyAction = null;
+    let holdResetTx = false;
+    let lastWalkCtrl = null;
 
     function motorLog(...args) {
         if (MOTOR_LOG) console.log('[BrainMotor]', ...args);
@@ -101,165 +158,46 @@ export function createBrainMotor({
         console.warn('[BrainMotor]', ...args);
     }
 
-    function resolveGroup(header) {
-        const h = String(header || '').toUpperCase();
-        if (headerToGroup.has(h)) return headerToGroup.get(h);
-        if (h === 'MOTO' || h === 'MOTR') return groups[0] || null;
-        return null;
+    const rx = createBrainMotorRx({
+        model,
+        data,
+        groups,
+        onCtrlChanged,
+        applyRx: applyRxInit,
+        intervalMs: MOTOR_INTERVAL_MS,
+        log: motorLog,
+        warn: motorWarn,
+    });
+
+    function snapshotCtrl() {
+        if (!data?.ctrl) return null;
+        return Array.from(data.ctrl, (x) => Number(x) || 0);
     }
 
-    function packHeader(tag, floats) {
-        const header = new TextEncoder().encode(String(tag).slice(0, 4).padEnd(4, ' '));
-        const out = new Uint8Array(4 + floats.byteLength);
-        out.set(header, 0);
-        out.set(
-            new Uint8Array(floats.buffer, floats.byteOffset, floats.byteLength),
-            4
-        );
-        return out.buffer;
-    }
-
-    function scaleOutcome(outcome, scale) {
-        const base = outcome && typeof outcome === 'object' ? outcome : {};
-        const r = Math.max(-1, Math.min(1, (Number(base.reward) || 0) * scale));
-        return {
-            ...base,
-            reward: r,
-            valence: r,
-            posSum: Math.max(0, r),
-            negSum: Math.max(0, -r),
-        };
-    }
-
-    function outcomeForGroup(group) {
-        const o = getLastMotorOutcome();
-        const role = group?.role;
-        const id = group?.id;
-        if (role === 'loco' || role === 'leg' || role === 'waist' || id === 'loco') {
-            return o;
-        }
-        if (role === 'manip') return scaleOutcome(o, 0.12);
-        return scaleOutcome(o, 0.08);
-    }
-
-    function packGroupTx(group, globalState, _ignored) {
-        return packGroupObservation(model, data, group, outcomeForGroup(group), globalState);
-    }
-
-    function applyGroupAction(group, actions) {
-        const n = Math.min(group.indices.length, actions.length);
-        for (let j = 0; j < n; j++) {
-            const i = group.indices[j];
-            let v = Number(actions[j]);
-            if (!Number.isFinite(v)) v = 0;
-            const low = model.actuator_ctrlrange[i * 2];
-            const high = model.actuator_ctrlrange[i * 2 + 1];
-            if (low !== high) v = Math.max(low, Math.min(high, v));
-            data.ctrl[i] = v;
-        }
+    function writeCtrl(src) {
+        if (!data?.ctrl || !src?.length) return false;
+        const n = Math.min(data.ctrl.length, src.length);
+        for (let i = 0; i < n; i++) data.ctrl[i] = Number(src[i]) || 0;
         onCtrlChanged();
+        return true;
     }
 
-    function applyAction(actions) {
-        const n = Math.min(model.nu, actions.length);
-        for (let i = 0; i < n; i++) {
-            let v = Number(actions[i]);
-            if (!Number.isFinite(v)) v = 0;
-            const low = model.actuator_ctrlrange[i * 2];
-            const high = model.actuator_ctrlrange[i * 2 + 1];
-            if (low !== high) v = Math.max(low, Math.min(high, v));
-            data.ctrl[i] = v;
-        }
-        onCtrlChanged();
+    function captureWalkCtrl() {
+        const snap = snapshotCtrl();
+        if (snap?.length) lastWalkCtrl = snap;
+        return lastWalkCtrl;
     }
 
-    function stopPlayback(header) {
-        const st = play.get(header);
-        if (!st) return;
-        if (st.timer != null) {
-            clearTimeout(st.timer);
-            st.timer = null;
-        }
-        st.queue = null;
-        st.index = 0;
+    function applyWalkCtrl() {
+        if (lastWalkCtrl?.length) return writeCtrl(lastWalkCtrl);
+        return false;
     }
 
-    function stopAllPlayback() {
-        for (const g of groups) stopPlayback(g.header);
+    function packGroupTx(group, globalState, outcome) {
+        return packGroupObservation(model, data, group, outcome, globalState);
     }
 
-    function startPlayback(group, frames) {
-        if (!group || !frames?.length) return;
-
-        const header = group.header;
-        let st = play.get(header);
-        if (!st) {
-            st = { queue: null, index: 0, timer: null, seqId: 0 };
-            play.set(header, st);
-        }
-
-        stopPlayback(header);
-        st.seqId++;
-        const myId = st.seqId;
-
-        st.queue = frames;
-        st.index = 0;
-
-        motorLog('RX sequence start', {
-            header,
-            group: group.id,
-            role: group.role,
-            seqId: myId,
-            frameCount: frames.length,
-            actionSize: group.actionSize,
-            intervalMs: MOTOR_INTERVAL_MS,
-        });
-
-        const step = () => {
-            const cur = play.get(header);
-            if (!cur || myId !== cur.seqId) return;
-
-            if (!cur.queue || cur.index >= cur.queue.length) {
-                motorLog('RX sequence done', {
-                    header,
-                    seqId: myId,
-                    played: cur.index,
-                });
-                cur.timer = null;
-                cur.queue = null;
-                cur.index = 0;
-                return;
-            }
-
-            applyGroupAction(group, cur.queue[cur.index]);
-            cur.index++;
-
-            if (cur.index < cur.queue.length && myId === cur.seqId) {
-                cur.timer = setTimeout(step, MOTOR_INTERVAL_MS);
-            } else if (myId === cur.seqId) {
-                motorLog('RX sequence done', {
-                    header,
-                    seqId: myId,
-                    played: cur.index,
-                });
-                cur.timer = null;
-                cur.queue = null;
-                cur.index = 0;
-            }
-        };
-
-        step();
-    }
-
-    function sendMotorFrame() {
-        if (!isReady()) return;
-        const now = performance.now();
-        if (now - lastMotorSend < MOTOR_INTERVAL_MS) return;
-        lastMotorSend = now;
-
-        const outcome = getLastMotorOutcome();
-        const globalState = readGlobalMotorState(model, data, outcome, extractOpts);
-
+    function sendObsOnly(outcome, globalState) {
         if (!groups.length) {
             const packed = packGroupObservation(
                 model,
@@ -269,41 +207,44 @@ export function createBrainMotor({
                     id: 'all',
                     indices: Array.from({ length: fullActionSize }, (_, i) => i),
                     actionSize: fullActionSize,
+                    imuBody: 'pelvis',
+                    imuSite: 'imu_in_pelvis',
                 },
                 outcome,
                 globalState
             );
             sendBinary(packHeader('MOTO', packed));
-            txCount++;
             return;
         }
-
         for (const group of groups) {
-            const packed = packGroupTx(group, globalState, outcome);
-            sendBinary(packHeader(group.header, packed));
+            sendBinary(packHeader(group.header, packGroupTx(group, globalState, outcome)));
         }
+    }
+
+    function sendMotorFrame() {
+        if (!txEnabled || holdResetTx || !isReady()) return;
+        const now = performance.now();
+        if (now - lastMotorSend < MOTOR_INTERVAL_MS) return;
+        lastMotorSend = now;
+
+        const outcome = liveOutcome(policyAction, rx.isApplyRx());
+        const globalState = readGlobalMotorState(model, data, outcome, extractOpts);
+        sendObsOnly(outcome, globalState);
 
         txCount++;
         if (now - lastTxLogAt >= MOTOR_LOG_EVERY_MS) {
             const snap = touch.getTouchSnapshot();
             motorLog('TX MOT*', {
                 packetsThisSec: txCount,
-                groups: groups.map(
-                    (g) => `${g.header}:${g.id}:${g.role}:act=${g.actionSize}:obs=${obsSizeForGroup(g)}`
-                ),
-                layout: {
-                    global: GLOBAL_OBS_N,
-                    localPlanes: LOCAL_PLANES,
-                    outcome: OUTCOME_OBS_N,
-                },
+                applyRx: rx.isApplyRx(),
+                actor: actorLabel(rx.isApplyRx()),
+                groups: groups.map((g) => `${g.header}:${g.id}`),
                 global: {
-                    reward: outcome?.reward,
-                    posSum: outcome?.posSum,
-                    negSum: outcome?.negSum,
-                    advantage: +resolveAdvantageFromOutcome(outcome).toFixed(3),
+                    onFloor: !!outcome?.onFloor,
+                    fallen: !!outcome?.fallen,
                     upright: globalState.upright,
                     pelvis_z: globalState.pelvis_z,
-                    vx: globalState.vx,
+                    cmd: outcome?.cmd,
                 },
                 touch: snap.enabled ? snap.groups : 'off',
             });
@@ -312,42 +253,49 @@ export function createBrainMotor({
         }
     }
 
-    function sendZeroActionSequence() {
-        if (!isReady()) return false;
+    function resetPlantMemory() {
+        policyAction = null;
+        holdResetTx = true;
+        rx.setApplyRx(false);
+        rx.stopAllPlayback();
+        rx.resetCounters();
+        lastMotorSend = 0;
+        txCount = 0;
+        lastTxLogAt = 0;
+        touch.clearAllTouchOutcomes?.();
+        applyWalkCtrl();
+    }
 
-        const outcome = getLastMotorOutcome();
+    function sendResetPlant() {
+        resetPlantMemory();
+        applyWalkCtrl();
+        onCtrlChanged();
+
+        const outcome = walkingResetOutcome();
         const globalState = readGlobalMotorState(model, data, outcome, extractOpts);
+        globalState.fallen = false;
+        globalState.success = false;
 
-        if (!groups.length) {
-            const zeros = new Float32Array(fullActionSize);
-            applyAction(zeros);
-            const packed = packGroupObservation(
-                model,
-                data,
-                {
-                    header: 'MOTO',
-                    id: 'all',
-                    indices: Array.from({ length: fullActionSize }, (_, i) => i),
-                    actionSize: fullActionSize,
-                },
-                outcome,
-                globalState
-            );
-            sendBinary(packHeader('MOTO', packed));
-            return true;
+        if (!isReady()) {
+            motorLog('reset plant local only (ws not ready)');
+            return false;
         }
 
-        for (const group of groups) {
-            const zeros = new Float32Array(group.actionSize);
-            startPlayback(group, [zeros]);
-            sendBinary(packHeader(group.header, packGroupTx(group, globalState, outcome)));
-        }
-
-        motorLog('TX zero action sequence', {
-            groups: groups.map((g) => `${g.header}:${g.actionSize}`),
-            obsSizes,
+        sendObsOnly(outcome, globalState);
+        motorLog('TX reset plant walk', {
+            groups: groups.map((g) => `${g.header}:${g.id}:${g.actionSize}`),
+            fallen: false,
+            onFloor: false,
+            cmd: outcome.cmd,
+            wroteCtrl: !!lastWalkCtrl,
+            holdResetTx,
         });
         return true;
+    }
+
+    function releaseResetHold() {
+        holdResetTx = false;
+        captureWalkCtrl();
     }
 
     function startLoop() {
@@ -360,103 +308,15 @@ export function createBrainMotor({
             clearInterval(motorTimer);
             motorTimer = null;
         }
-        stopAllPlayback();
-        for (const st of play.values()) st.seqId++;
-    }
-
-    function handleRx(uint8) {
-        if (!uint8 || uint8.length < 8) {
-            motorWarn('RX too short', { length: uint8?.length });
-            return;
-        }
-
-        const header = String.fromCharCode(uint8[0], uint8[1], uint8[2], uint8[3]);
-        const group = resolveGroup(header);
-        if (!group) {
-            motorWarn('RX unknown motor header', { header });
-            return;
-        }
-
-        const as = group.actionSize;
-        let frames = null;
-
-        if (uint8.length >= 8 && uint8[4] === 2) {
-            const frameCount = uint8[5] | (uint8[6] << 8);
-            const payload = uint8.subarray(8);
-            if (payload.byteLength % 4 !== 0) {
-                motorWarn('RX multi-frame misaligned', {
-                    header,
-                    payloadBytes: payload.byteLength,
-                });
-                return;
-            }
-            const floats = new Float32Array(
-                payload.buffer,
-                payload.byteOffset,
-                payload.byteLength / 4
-            );
-            const actualFrames = Math.min(
-                frameCount || 1,
-                Math.floor(floats.length / as)
-            );
-            if (actualFrames < 1) {
-                motorWarn('RX no complete frames', {
-                    header,
-                    frameCount,
-                    floats: floats.length,
-                    actionSize: as,
-                });
-                return;
-            }
-
-            frames = new Array(actualFrames);
-            for (let f = 0; f < actualFrames; f++) {
-                const base = f * as;
-                frames[f] = floats.subarray(base, base + as);
-            }
-        } else {
-            const payload = uint8.subarray(4);
-            if (payload.byteLength % 4 !== 0) {
-                motorWarn('RX single-frame misaligned', {
-                    header,
-                    payloadBytes: payload.byteLength,
-                });
-                return;
-            }
-            const floats = new Float32Array(
-                payload.buffer,
-                payload.byteOffset,
-                payload.byteLength / 4
-            );
-            frames = [floats.subarray(0, Math.min(as, floats.length))];
-        }
-
-        startPlayback(group, frames);
-
-        rxCount++;
-        const now = performance.now();
-        if (now - lastRxLogAt >= MOTOR_LOG_EVERY_MS) {
-            const st = play.get(group.header);
-            motorLog('RX MOT*', {
-                packetsThisSec: rxCount,
-                header: group.header,
-                role: group.role,
-                lastSeqFrames: frames.length,
-                actionSize: as,
-                multiFrame: uint8[4] === 2,
-                playing: st?.queue
-                    ? { index: st.index, total: st.queue.length, seqId: st.seqId }
-                    : null,
-            });
-            lastRxLogAt = now;
-            rxCount = 0;
-        }
+        rx.stopAllPlayback();
+        rx.bumpSeqIds();
     }
 
     function resetCounters() {
-        txCount = rxCount = 0;
-        lastTxLogAt = lastRxLogAt = 0;
+        txCount = 0;
+        lastTxLogAt = 0;
         lastMotorSend = 0;
+        rx.resetCounters();
     }
 
     return {
@@ -466,6 +326,7 @@ export function createBrainMotor({
         motorCount,
         groups,
         locoGroup,
+        hipGroups,
         legGroups,
         waistGroup,
         manipGroups,
@@ -474,25 +335,43 @@ export function createBrainMotor({
         getLocoGroup: () => locoGroup,
         getObsSizes: () => obsSizes.slice(),
         packAll: (outcome) =>
-            packAllGroupObservations(model, data, groups, outcome || getLastMotorOutcome(), extractOpts),
+            packAllGroupObservations(
+                model,
+                data,
+                groups,
+                outcome || liveOutcome(policyAction, rx.isApplyRx()),
+                extractOpts
+            ),
         startLoop,
         stopLoop,
         sendMotorFrame,
-        sendZeroActionSequence,
-        handleRx,
+        sendZeroActionSequence: sendResetPlant,
+        sendResetPlant,
+        resetPlantMemory,
+        captureStandCtrl: captureWalkCtrl,
+        applyStandCtrl: applyWalkCtrl,
+        captureWalkCtrl,
+        applyWalkCtrl,
+        releaseResetHold,
+        isResetHolding: () => holdResetTx,
+        handleRx: rx.handleRx,
         resetCounters,
-        applyGroupAction,
-        applyAction,
-        isPlaying: () => [...play.values()].some((s) => !!s.queue),
-        getPlayProgress: () => {
-            const out = {};
-            for (const [h, st] of play) {
-                out[h] = st.queue
-                    ? { index: st.index, total: st.queue.length, seqId: st.seqId }
-                    : null;
-            }
-            return out;
+        applyGroupAction: rx.applyGroupAction,
+        applyAction: rx.applyAction,
+        outcomeForGroup: (group, outcome) => outcomeForGroup(group, outcome),
+        isPlaying: rx.isPlaying,
+        getPlayProgress: rx.getPlayProgress,
+        setApplyRx: rx.setApplyRx,
+        isApplyRx: rx.isApplyRx,
+        setTxEnabled: (v) => { txEnabled = !!v; },
+        isTxEnabled: () => txEnabled && !holdResetTx,
+        notePolicyAction: (act) => {
+            policyAction = act
+                ? Array.from(act, (x) => Number(x) || 0)
+                : null;
+            if (policyAction) lastWalkCtrl = policyAction.slice();
         },
+        stopAllPlayback: rx.stopAllPlayback,
         enableTouch: (on) => touch.enableTouch(on),
         isTouchEnabled: () => touch.isTouchEnabled(),
         setGroupTouchOutcome: (header, outcome) =>
@@ -500,5 +379,8 @@ export function createBrainMotor({
         clearGroupTouchOutcome: (header) => touch.clearGroupTouchOutcome(header),
         clearAllTouchOutcomes: () => touch.clearAllTouchOutcomes(),
         getTouchSnapshot: () => touch.getTouchSnapshot(),
+        logGroupImus: () => logGroupImus(model, data, groups),
     };
 }
+
+export default createBrainMotor;

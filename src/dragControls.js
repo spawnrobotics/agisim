@@ -1,5 +1,8 @@
 // dragControls.js
 import * as THREE from 'three';
+
+const SKIP_NAME = /floor|ground|plane|sky|world|terrain|visual_only/i;
+
 export function createDragControls({
     renderer,
     camera,
@@ -12,6 +15,7 @@ export function createDragControls({
     damping = 20,
     maxForce = 250,
 }) {
+    const el = renderer.domElement;
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
     const dragPlane = new THREE.Plane();
@@ -19,138 +23,127 @@ export function createDragControls({
     const targetPos = new THREE.Vector3();
     const grabWorld = new THREE.Vector3();
     const forceThree = new THREE.Vector3();
-    const offsetThree = new THREE.Vector3();
-    const torqueThree = new THREE.Vector3();
+    const camDir = new THREE.Vector3();
+    const planeN = new THREE.Vector3();
 
     let isPulling = false;
     let bodyId = -1;
+    let pointerId = null;
 
-    // Grab point in body-local frame (MuJoCo axes: X right, Y forward, Z up)
-    // local = R^T * (world - xpos)
     const grabLocalMj = new Float64Array(3);
+    const R = new Float64Array(9);
+    const grabMj = new Float64Array(3);
+    const forceMj = new Float64Array(3);
+    const rMj = new Float64Array(3);
+    const torqueMj = new Float64Array(3);
 
-    // ── Coordinate helpers (Three Y-up ↔ MuJoCo Z-up) ─────────
     function threeToMj(x, y, z, out) {
-        // three (x,y,z) → mj (x, -z, y)
         out[0] = x;
         out[1] = -z;
         out[2] = y;
     }
 
     function mjToThree(mx, my, mz, target) {
-        // mj (x,y,z) → three (x, z, -y)
         return target.set(mx, mz, -my);
     }
 
-    function clearExternalForces() {
-        // xfrc_applied: nbody × 6  (fx,fy,fz, tx,ty,tz) in world / MuJoCo frame
-        if (data.xfrc_applied) {
-            data.xfrc_applied.fill(0);
+    function bodyNameOf(bid) {
+        try {
+            return String(model.id2name?.(1, bid) || '');
+        } catch (_) {
+            return '';
         }
     }
 
+    function isDraggableBody(bid) {
+        if (!(bid >= 1)) return false;
+        const name = bodyNameOf(bid);
+        if (SKIP_NAME.test(name)) return false;
+        return true;
+    }
+
+    function clearExternalForces() {
+        data.xfrc_applied?.fill(0);
+    }
+
+    function setOrbitEnabled(on) {
+        if (!controls) return;
+        controls.enabled = !!on;
+        if (typeof controls.enablePan === 'boolean') controls.enablePan = !!on;
+        if (typeof controls.enableRotate === 'boolean') controls.enableRotate = !!on;
+        if (typeof controls.enableZoom === 'boolean') controls.enableZoom = true;
+    }
+
     function updateMouse(event) {
-        const rect = renderer.domElement.getBoundingClientRect();
-        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-        mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        const rect = el.getBoundingClientRect();
+        const w = rect.width || 1;
+        const h = rect.height || 1;
+        mouse.x = ((event.clientX - rect.left) / w) * 2 - 1;
+        mouse.y = -((event.clientY - rect.top) / h) * 2 + 1;
+    }
+
+    function collectMeshes() {
+        const meshes = [];
+        const n = bodyGroups?.length | 0;
+        for (let i = 1; i < n; i++) {
+            if (!isDraggableBody(i)) continue;
+            const g = bodyGroups[i];
+            if (!g) continue;
+            g.traverse((obj) => {
+                if (!obj.isMesh || !obj.visible) return;
+                obj.userData.bodyId = i;
+                meshes.push(obj);
+            });
+        }
+        return meshes;
     }
 
     function pick(event) {
         updateMouse(event);
         raycaster.setFromCamera(mouse, camera);
-
-        const meshes = [];
-        for (let i = 1; i < bodyGroups.length; i++) {
-            bodyGroups[i].traverse((obj) => {
-                if (obj.isMesh) {
-                    obj.userData.bodyId = i;
-                    meshes.push(obj);
-                }
-            });
-        }
-
+        const meshes = collectMeshes();
+        if (!meshes.length) return null;
         const hits = raycaster.intersectObjects(meshes, true);
-        if (hits.length === 0) return null;
-        return hits[0];
+        for (const hit of hits) {
+            const bid = hit.object?.userData?.bodyId | 0;
+            if (isDraggableBody(bid)) return hit;
+        }
+        return null;
     }
 
-    /** Body rotation matrix from data.xmat (row-major 3×3, MuJoCo) */
     function bodyRotMj(bid, out9) {
         const o = bid * 9;
-        for (let i = 0; i < 9; i++) out9[i] = data.xmat[o + i];
+        const m = data.xmat;
+        for (let i = 0; i < 9; i++) out9[i] = m[o + i];
     }
 
-    const R = new Float64Array(9);
-
     function worldGrabPointMj(out3) {
-        // world = xpos + R * local
         bodyRotMj(bodyId, R);
         const px = data.xpos[bodyId * 3];
         const py = data.xpos[bodyId * 3 + 1];
         const pz = data.xpos[bodyId * 3 + 2];
-
         const lx = grabLocalMj[0];
         const ly = grabLocalMj[1];
         const lz = grabLocalMj[2];
-
         out3[0] = px + R[0] * lx + R[1] * ly + R[2] * lz;
         out3[1] = py + R[3] * lx + R[4] * ly + R[5] * lz;
         out3[2] = pz + R[6] * lx + R[7] * ly + R[8] * lz;
     }
 
-    const grabMj = new Float64Array(3);
-    const targetMj = new Float64Array(3);
-    const forceMj = new Float64Array(3);
-    const rMj = new Float64Array(3); // vector from COM to grab point
-    const torqueMj = new Float64Array(3);
-
-    /**
-     * Call every frame *before* mj_step while pulling.
-     * Recomputes spring-damper force at the moving grab point.
-     */
     function update() {
         if (!isPulling || bodyId < 1) return;
 
         worldGrabPointMj(grabMj);
         mjToThree(grabMj[0], grabMj[1], grabMj[2], grabWorld);
 
-        // Spring toward mouse target (in Three space, then convert force)
         forceThree.copy(targetPos).sub(grabWorld).multiplyScalar(stiffness);
-
-        // Simple damping using body COM velocity (good enough)
-        const cvel = data.cvel; // rotational then translational in body frame — skip for simplicity
-        // Use qvel of free joint if body 1, else approximate with 0 damping on other bodies
-        // Better: use data.qvel mapped via body — for robustness use finite difference optional.
-        // Lightweight: damp in world using subtree linear vel if available.
-        // MuJoCo: data.cvel is 6 * nbody (ang, then lin) in body frame.
-        // Convert body linear vel to world for damping along force direction only.
-        const linBody = bodyId * 6 + 3;
-        // cvel linear is in body frame; rotate to world
-        bodyRotMj(bodyId, R);
-        const vx =
-            R[0] * data.cvel[linBody] +
-            R[1] * data.cvel[linBody + 1] +
-            R[2] * data.cvel[linBody + 2];
-        const vy =
-            R[3] * data.cvel[linBody] +
-            R[4] * data.cvel[linBody + 1] +
-            R[5] * data.cvel[linBody + 2];
-        const vz =
-            R[6] * data.cvel[linBody] +
-            R[7] * data.cvel[linBody + 1] +
-            R[8] * data.cvel[linBody + 2];
-
-        // damping force in MuJoCo world frame
-        const dampFx = -damping * vx;
-        const dampFy = -damping * vy;
-        const dampFz = -damping * vz;
-
         threeToMj(forceThree.x, forceThree.y, forceThree.z, forceMj);
-        forceMj[0] += dampFx;
-        forceMj[1] += dampFy;
-        forceMj[2] += dampFz;
 
-        // Clamp magnitude
+        const lin = bodyId * 6 + 3;
+        forceMj[0] += -damping * (data.cvel[lin] || 0);
+        forceMj[1] += -damping * (data.cvel[lin + 1] || 0);
+        forceMj[2] += -damping * (data.cvel[lin + 2] || 0);
+
         const mag = Math.hypot(forceMj[0], forceMj[1], forceMj[2]);
         if (mag > maxForce && mag > 1e-8) {
             const s = maxForce / mag;
@@ -159,7 +152,6 @@ export function createDragControls({
             forceMj[2] *= s;
         }
 
-        // Torque = r × F  (r = grab - COM)
         rMj[0] = grabMj[0] - data.xpos[bodyId * 3];
         rMj[1] = grabMj[1] - data.xpos[bodyId * 3 + 1];
         rMj[2] = grabMj[2] - data.xpos[bodyId * 3 + 2];
@@ -178,98 +170,119 @@ export function createDragControls({
         data.xfrc_applied[base + 5] = torqueMj[2];
     }
 
-    // ── Pointer events ────────────────────────────────────────
-    function onPointerDown(e) {
-        if (e.button !== 0) return;
-
-        const hit = pick(e);
-        if (!hit) return;
+    function beginPull(e, hit) {
+        const bid = hit.object?.userData?.bodyId | 0;
+        if (!isDraggableBody(bid)) return false;
 
         isPulling = true;
-        bodyId = hit.object.userData.bodyId;
-        controls.enabled = false;
+        bodyId = bid;
+        pointerId = e.pointerId;
+        setOrbitEnabled(false);
 
-        // Hit point in Three.js world
         hitPoint.copy(hit.point);
         targetPos.copy(hit.point);
 
-        // Horizontal plane by default (pull mostly in XZ / height).
-        // Use camera-facing plane for more natural 3D pull:
-        const camDir = new THREE.Vector3();
         camera.getWorldDirection(camDir);
-        dragPlane.setFromNormalAndCoplanarPoint(camDir.negate(), hitPoint);
+        planeN.copy(camDir).negate();
+        dragPlane.setFromNormalAndCoplanarPoint(planeN, hitPoint);
 
-        // Store grab point in body-local MuJoCo frame
         const mx = data.xpos[bodyId * 3];
         const my = data.xpos[bodyId * 3 + 1];
         const mz = data.xpos[bodyId * 3 + 2];
 
-        const hitMj = new Float64Array(3);
-        threeToMj(hit.point.x, hit.point.y, hit.point.z, hitMj);
-
-        // local = R^T * (hit - xpos)
+        threeToMj(hit.point.x, hit.point.y, hit.point.z, grabMj);
         bodyRotMj(bodyId, R);
-        const dx = hitMj[0] - mx;
-        const dy = hitMj[1] - my;
-        const dz = hitMj[2] - mz;
-        // R is row-major; R^T * v
+        const dx = grabMj[0] - mx;
+        const dy = grabMj[1] - my;
+        const dz = grabMj[2] - mz;
         grabLocalMj[0] = R[0] * dx + R[3] * dy + R[6] * dz;
         grabLocalMj[1] = R[1] * dx + R[4] * dy + R[7] * dz;
         grabLocalMj[2] = R[2] * dx + R[5] * dy + R[8] * dz;
 
+        try {
+            el.setPointerCapture(e.pointerId);
+        } catch (_) { /* ignore */ }
+
+        return true;
+    }
+
+    function endPull(e) {
+        if (!isPulling) return;
+        isPulling = false;
+        bodyId = -1;
+        clearExternalForces();
+        setOrbitEnabled(true);
+        try {
+            const id = e?.pointerId ?? pointerId;
+            if (id != null) el.releasePointerCapture(id);
+        } catch (_) { /* ignore */ }
+        pointerId = null;
+    }
+
+    function onPointerDown(e) {
+        if (e.button !== 0) return;
+        if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+
+        const hit = pick(e);
+        if (!hit) return;
+
+        if (!beginPull(e, hit)) return;
+
         e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
     }
 
     function onPointerMove(e) {
         if (!isPulling) return;
-
         updateMouse(e);
         raycaster.setFromCamera(mouse, camera);
-
         if (raycaster.ray.intersectPlane(dragPlane, hitPoint)) {
             targetPos.copy(hitPoint);
         }
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
     }
 
-    function onPointerUp() {
+    function onPointerUp(e) {
         if (!isPulling) return;
-        isPulling = false;
-        bodyId = -1;
-        controls.enabled = true;
-        clearExternalForces();
+        endPull(e);
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
     }
 
-    const el = renderer.domElement;
-    el.addEventListener('pointerdown', onPointerDown);
-    el.addEventListener('pointermove', onPointerMove);
-    el.addEventListener('pointerup', onPointerUp);
-    el.addEventListener('pointerleave', onPointerUp);
-    el.addEventListener('pointercancel', onPointerUp);
+    el.style.touchAction = 'none';
+    el.addEventListener('pointerdown', onPointerDown, { capture: true });
+    el.addEventListener('pointermove', onPointerMove, { capture: true });
+    el.addEventListener('pointerup', onPointerUp, { capture: true });
+    el.addEventListener('pointercancel', onPointerUp, { capture: true });
+    window.addEventListener('pointerup', onPointerUp, { capture: true });
 
     return {
-        /** Apply current pull force — call every frame before mj_step */
         update,
-
-        isDragging: () => isPulling, // keep name for compatibility
+        isDragging: () => isPulling,
         isPulling: () => isPulling,
-
+        getBodyId: () => bodyId,
         setStiffness: (v) => {
-            stiffness = v;
+            stiffness = Number(v) || 0;
         },
         setDamping: (v) => {
-            damping = v;
+            damping = Number(v) || 0;
         },
         setMaxForce: (v) => {
-            maxForce = v;
+            maxForce = Number(v) || 0;
         },
-
         dispose() {
-            clearExternalForces();
-            el.removeEventListener('pointerdown', onPointerDown);
-            el.removeEventListener('pointermove', onPointerMove);
-            el.removeEventListener('pointerup', onPointerUp);
-            el.removeEventListener('pointerleave', onPointerUp);
-            el.removeEventListener('pointercancel', onPointerUp);
+            endPull();
+            el.removeEventListener('pointerdown', onPointerDown, { capture: true });
+            el.removeEventListener('pointermove', onPointerMove, { capture: true });
+            el.removeEventListener('pointerup', onPointerUp, { capture: true });
+            el.removeEventListener('pointercancel', onPointerUp, { capture: true });
+            window.removeEventListener('pointerup', onPointerUp, { capture: true });
         },
     };
 }
+
+export default createDragControls;

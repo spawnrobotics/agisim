@@ -75,7 +75,7 @@ function copySelectedRobotPublicAssets(robotKey) {
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, process.cwd(), '');
-    const robot = env.VITE_ROBOT || 'g1';
+    const robot = env.VITE_ROBOT || 'microduck';
 
     return {
         publicDir: 'public',
@@ -107,8 +107,9 @@ export default defineConfig(({ mode }) => {
         },
         assetsInclude: ['**/*.wasm'],
         optimizeDeps: {
-            exclude: ['@mujoco/mujoco'],
+            exclude: ['@mujoco/mujoco', 'onnxruntime-web'],
         },
+        assetsInclude: ['**/*.wasm', '**/*.onnx'],
         plugins: [copySelectedRobotPublicAssets(robot)],
     };
 });
