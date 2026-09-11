@@ -1,4 +1,5 @@
 // rewards/duck/measure.js
+// Shared plant read for stand + walk. Reward only — no ctrl writes.
 
 import {
     quatUpDot,

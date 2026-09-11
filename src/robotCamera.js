@@ -1,4 +1,3 @@
-// robotCamera.js
 import * as THREE from 'three';
 import CONFIG from './config.js';
 
@@ -83,7 +82,6 @@ function applyHeadCamLayers(cam) {
 function defaultLocalPose(bodyName) {
     const n = String(bodyName || '');
     if (/jaw_soft|head_camera/i.test(n)) {
-        // MJCF camera on jaw_soft: pos 0.0155, -9e-5, -0.0733
         return {
             position: [0.016, 0, -0.073],
             rotation: [0, Math.PI, 0],
@@ -147,6 +145,9 @@ export function createRobotHeadCamera({
     configureHeadCamera = null,
     headBody = CONFIG.robot?.headBody,
 } = {}) {
+    const captureEnabled = CONFIG.streams?.visual === true
+        || CONFIG.enableStreamVideo === true;
+
     const bodyId = findHeadBodyId(model, headBody);
     const parent = bodyGroups[bodyId] || bodyGroups[1];
     if (!parent) {
@@ -238,7 +239,7 @@ export function createRobotHeadCamera({
         canvas: previewCanvas,
         antialias: true,
         alpha: false,
-        preserveDrawingBuffer: true,
+        preserveDrawingBuffer: captureEnabled,
     });
     headRenderer.setSize(previewWidth, previewHeight, false);
     headRenderer.setPixelRatio(1);
@@ -248,12 +249,14 @@ export function createRobotHeadCamera({
     }
 
     const captureCanvas = document.createElement('canvas');
-    captureCanvas.width = frameSize;
-    captureCanvas.height = frameSize;
-    const captureCtx = captureCanvas.getContext('2d', {
-        willReadFrequently: true,
-        alpha: false,
-    });
+    captureCanvas.width = captureEnabled ? frameSize : 1;
+    captureCanvas.height = captureEnabled ? frameSize : 1;
+    const captureCtx = captureEnabled
+        ? captureCanvas.getContext('2d', {
+            willReadFrequently: true,
+            alpha: false,
+        })
+        : null;
 
     function renderFrame() {
         if (!cam || !headRenderer) return null;
@@ -263,6 +266,7 @@ export function createRobotHeadCamera({
     }
 
     function grabRgbaFrame() {
+        if (!captureEnabled || !captureCtx) return null;
         const preview = renderFrame();
         if (!preview) return null;
         captureCtx.imageSmoothingEnabled = true;
@@ -285,6 +289,7 @@ export function createRobotHeadCamera({
         previewCanvas,
         captureCanvas,
         frameSize,
+        captureEnabled,
         renderFrame,
         grabRgbaFrame,
         logPose,

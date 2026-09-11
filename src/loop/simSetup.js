@@ -46,6 +46,7 @@ function zeroVel(model, data) {
     }
 }
 
+/** STAND2 on the 14 policy servos. qpos0 is not the policy home. */
 export function applyDuckStandingPose(model, data, duckPolicy = null) {
     const nAct = Math.min(ACT_N, model.nu | 0);
     const pose = duckPolicy?.defaultPose || DEFAULT_POSE;
@@ -141,6 +142,7 @@ export function resetStanding(mujoco, model, data, {
     data.qpos[6] = 0;
     zeroVel(model, data);
 
+    // Always enter the stand net. Do not start on walk with cmd=0 flicker.
     duckPolicy?.setSkill?.('stand');
     duckPolicy?.setVel?.(0, 0, 0);
     duckPolicy?.setHead?.(robot?.headCmd || [0, 0, 0, 0]);

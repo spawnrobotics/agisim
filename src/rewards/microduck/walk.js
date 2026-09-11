@@ -1,4 +1,6 @@
 // rewards/duck/walk.js
+// Walk score in [0, 1] while upright. Hard negative only when onFloor.
+// Walk-only: always score velocity tracking. No stand-hold path.
 
 import { clamp01, normalizeOutcome } from '../helpers.js';
 import {

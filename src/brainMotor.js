@@ -6,7 +6,6 @@ import { createTouchOutcome } from './rewards/touch.js';
 import {
     createMotorGroups,
     getLegGroups,
-    getHipGroups,
     getWaistGroup,
     getLocoGroup,
     getManipGroups,
@@ -121,7 +120,6 @@ export function createBrainMotor({
 
     const locoGroup = getLocoGroup(groups);
     const waistGroup = getWaistGroup(groups) || locoGroup;
-    const hipGroups = typeof getHipGroups === 'function' ? getHipGroups(groups) : [];
     const legGroups = getLegGroups(groups);
     const manipGroups = getManipGroups(groups);
     const gazeGroup = getGazeGroup(groups);
@@ -326,7 +324,6 @@ export function createBrainMotor({
         motorCount,
         groups,
         locoGroup,
-        hipGroups,
         legGroups,
         waistGroup,
         manipGroups,

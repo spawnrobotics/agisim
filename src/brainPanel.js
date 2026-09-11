@@ -34,7 +34,7 @@ export function createBrainPanel(brainWS) {
   const panel = document.createElement('div');
   panel.id = 'brain-panel';
   panel.innerHTML = `
-      <button id="brain-toggle-btn" class="ctrl-icon" type="button" title="Connect"></button>
+      <button id="brain-toggle-btn" class="ctrl-icon" style="display: none" type="button" title="Connect"></button>
       <div class="brain-sheet" hidden>
         <div class="row">
           <input id="brain-id-input" type="text" placeholder="brainId (optional)" />

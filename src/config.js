@@ -39,9 +39,18 @@ function clampCount(v, fallback = 1) {
     return Math.min(MAX_CORTEX_PER_MODALITY, n);
 }
 
+// Flip these. Disabled modalities are not joined, not sent, and inbound packets are dropped.
+const STREAMS = {
+    visual: envBool('VITE_STREAM_VIDEO', false),
+    auditory: envBool('VITE_STREAM_AUDIO', false),
+    motor: envBool('VITE_STREAM_MOTOR', true),
+};
+
 const CONFIG = {
     robot: resolveRobot(import.meta.env.VITE_ROBOT || DEFAULT_ROBOT_ID),
     wsBase: import.meta.env.VITE_BRAIN_WS_BASE || 'ws://127.0.0.1:3000/ws',
+
+    streams: STREAMS,
 
     frameSize: envInt('VITE_FRAME_SIZE', 32),
     motorFps: envInt('VITE_MOTOR_FPS', 30),
@@ -51,22 +60,24 @@ const CONFIG = {
     playbackRate: envNum('VITE_PLAYBACK_RATE', .25),
     maxStepsPerFrame: envInt('VITE_MAX_STEPS_PER_FRAME', 20),
 
-    /** Brain motor packets write data.ctrl. */
     applyRx: envBool('VITE_APPLY_RX', false),
-    /** ONNX joint targets are forwarded to the brain; do not leave them on data.ctrl. */
     policyToBrain: envBool('VITE_POLICY_TO_BRAIN', false),
 
-    visualCount: clampCount(envInt('VITE_VISUAL_COUNT', 1)),
-    auditoryCount: clampCount(envInt('VITE_AUDITORY_COUNT', 1)),
-    motorCount: clampCount(envInt('VITE_MOTOR_COUNT', 1)),
+    visualCount: STREAMS.visual ? clampCount(envInt('VITE_VISUAL_COUNT', 1)) : 0,
+    auditoryCount: STREAMS.auditory ? clampCount(envInt('VITE_AUDITORY_COUNT', 1)) : 0,
+    motorCount: STREAMS.motor ? clampCount(envInt('VITE_MOTOR_COUNT', 1)) : 0,
 
-    frameSizes: envIntList('VITE_FRAME_SIZES'),
-    actionSizes: envIntList('VITE_ACTION_SIZES'),
-    obsSizes: envIntList('VITE_OBS_SIZES'),
+    frameSizes: STREAMS.visual ? envIntList('VITE_FRAME_SIZES') : null,
+    actionSizes: STREAMS.motor ? envIntList('VITE_ACTION_SIZES') : null,
+    obsSizes: STREAMS.motor ? envIntList('VITE_OBS_SIZES') : null,
 
-    enableLearningVisual: envBool('VITE_LEARNING_VISUAL', false),
-    enableLearningAuditory: envBool('VITE_LEARNING_AUDITORY', false),
-    enableLearningMotor: envBool('VITE_LEARNING_MOTOR', true),
+    enableLearningVisual: STREAMS.visual && envBool('VITE_LEARNING_VISUAL', false),
+    enableLearningAuditory: STREAMS.auditory && envBool('VITE_LEARNING_AUDITORY', false),
+    enableLearningMotor: STREAMS.motor && envBool('VITE_LEARNING_MOTOR', true),
+
+    enableStreamVideo: STREAMS.visual,
+    enableStreamAudio: STREAMS.auditory,
+    enableStreamMotor: STREAMS.motor,
 
     mode: import.meta.env.MODE,
     isDev: import.meta.env.DEV,
@@ -78,6 +89,10 @@ const CONFIG = {
 
     maxCortexPerModality: MAX_CORTEX_PER_MODALITY,
 };
+
+export function isStreamEnabled(kind) {
+    return CONFIG.streams?.[kind] === true;
+}
 
 export function getWsBase() {
     return String(CONFIG.wsBase).replace(/\/$/, '');
@@ -108,38 +123,40 @@ export function getJoinPayload({
     frameSize,
     frameSizes,
 } = {}) {
-    const sizes = Array.isArray(actionSizes) && actionSizes.length
+    const visualOn = isStreamEnabled('visual');
+    const auditoryOn = isStreamEnabled('auditory');
+    const motorOn = isStreamEnabled('motor');
+
+    const sizes = motorOn && Array.isArray(actionSizes) && actionSizes.length
         ? actionSizes
             .map((n) => Math.floor(Number(n)))
             .filter((n) => Number.isFinite(n) && n >= 1)
             .slice(0, MAX_CORTEX_PER_MODALITY)
-        : (CONFIG.actionSizes || null);
+        : (motorOn ? CONFIG.actionSizes || null : null);
 
-    const observations = Array.isArray(obsSizes) && obsSizes.length
+    const observations = motorOn && Array.isArray(obsSizes) && obsSizes.length
         ? obsSizes
             .map((n) => Math.floor(Number(n)))
             .filter((n) => Number.isFinite(n) && n >= 1)
             .slice(0, MAX_CORTEX_PER_MODALITY)
-        : (CONFIG.obsSizes || null);
+        : (motorOn ? CONFIG.obsSizes || null : null);
 
-    const frames = Array.isArray(frameSizes) && frameSizes.length
+    const frames = visualOn && Array.isArray(frameSizes) && frameSizes.length
         ? frameSizes
             .map((n) => Math.floor(Number(n)))
             .filter((n) => Number.isFinite(n) && n >= 8)
             .slice(0, MAX_CORTEX_PER_MODALITY)
-        : (CONFIG.frameSizes || null);
+        : (visualOn ? CONFIG.frameSizes || null : null);
 
-    const vCount = clampCount(visualCount ?? CONFIG.visualCount, 1);
-    const aCount = clampCount(auditoryCount ?? CONFIG.auditoryCount, 1);
-    const mCount = clampCount(
-        motorCount ?? sizes?.length ?? CONFIG.motorCount,
-        1
-    );
+    const vCount = visualOn ? clampCount(visualCount ?? CONFIG.visualCount, 1) : 0;
+    const aCount = auditoryOn ? clampCount(auditoryCount ?? CONFIG.auditoryCount, 1) : 0;
+    const mCount = motorOn
+        ? clampCount(motorCount ?? sizes?.length ?? CONFIG.motorCount, 1)
+        : 0;
 
-    const primaryAction =
-        actionSize != null && Number.isFinite(Number(actionSize))
-            ? Math.max(1, Math.floor(Number(actionSize)))
-            : (sizes?.[0] ?? undefined);
+    const primaryAction = motorOn && actionSize != null && Number.isFinite(Number(actionSize))
+        ? Math.max(1, Math.floor(Number(actionSize)))
+        : (motorOn ? sizes?.[0] ?? undefined : undefined);
 
     const primaryFrame = Math.max(
         8,
@@ -149,7 +166,6 @@ export function getJoinPayload({
     const payload = {
         type: 'join',
         brainId: brainId || null,
-        frameSize: primaryFrame,
         visualCount: vCount,
         auditoryCount: aCount,
         motorCount: mCount,
@@ -158,6 +174,7 @@ export function getJoinPayload({
         enableLearningMotor: CONFIG.enableLearningMotor,
     };
 
+    if (visualOn) payload.frameSize = primaryFrame;
     if (primaryAction != null) payload.actionSize = primaryAction;
     if (sizes?.length) payload.actionSizes = sizes.slice(0, mCount);
     if (observations?.length) payload.obsSizes = observations.slice(0, mCount);

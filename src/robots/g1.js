@@ -24,6 +24,7 @@ export const G1_ROBOT = {
     headBody: 'head_link',
     headSite: 'imu_in_torso',
     chestAxis: 'x',
+    /** Source of truth for stand reward + motorObs head_z. */
     headLocal: { x: 0.0039635, y: 0, z: 0.38 },
     headCam: {
         position: [0.06, 0.4, 0],

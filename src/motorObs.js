@@ -1,4 +1,12 @@
 // motorObs.js
+// Brain packet: 14 globals + 3ν locals + 4 limb IMU + 7 reserved outcome slots.
+// globals[2]=upright [3]=gx [4]=gy [11]=wz [12]=fallen [13]=success
+// Those four stay PELVIS. Limb IMU is a second slice from that group's body/site.
+// local0 = joint angles (qpos − home)
+// local1 = qvel
+// local2 = last executed ctrl
+// limb IMU = body/site world-up, gravity in that frame, yaw rate about that up.
+// Never pack cmd, σ, reward, advantage, or pos-neg.
 
 import { MOTOR_OUTCOME_EXTRA, readStandHeights } from './rewards/rewards.js';
 import { quatUpDot, clamp11 } from './rewards/helpers.js';
@@ -27,23 +35,45 @@ export const LIMB_IMU_N = 4;
 export const OUTCOME_OBS_N = MOTOR_OUTCOME_EXTRA + 1 + 3;
 
 const IMU_BODY_FALLBACKS = {
-    left_hip: ['left_hip_roll_link', 'left_hip_pitch_link', 'left_hip_yaw_link'],
-    right_hip: ['right_hip_roll_link', 'right_hip_pitch_link', 'right_hip_yaw_link'],
-    left_leg: ['left_knee_link', 'left_ankle_pitch_link', 'left_ankle_roll_link'],
-    right_leg: ['right_knee_link', 'right_ankle_pitch_link', 'right_ankle_roll_link'],
-    waist: ['torso_link', 'pelvis'],
-    pelvis: ['pelvis', 'torso_link'],
-    loco: ['torso_link', 'pelvis'],
-    all: ['torso_link', 'pelvis'],
-    other: ['torso_link', 'pelvis'],
-    left_arm: ['left_wrist_yaw_link', 'left_elbow_link', 'left_shoulder_roll_link'],
-    right_arm: ['right_wrist_yaw_link', 'right_elbow_link', 'right_shoulder_roll_link'],
-    left_hand: ['left_wrist_yaw_link'],
-    right_hand: ['right_wrist_yaw_link'],
-    left_manip: ['left_wrist_yaw_link'],
-    right_manip: ['right_wrist_yaw_link'],
-    arms: ['torso_link'],
-    head: ['head_link', 'torso_link'],
+    left_leg: [
+        'left_ankle_roll_link',
+        'left_ankle_pitch_link',
+        'left_knee_link',
+        'left_hip_pitch_link',
+        'left_hip_roll_link',
+    ],
+    right_leg: [
+        'right_ankle_roll_link',
+        'right_ankle_pitch_link',
+        'right_knee_link',
+        'right_hip_pitch_link',
+        'right_hip_roll_link',
+    ],
+    waist: ['pelvis', 'waist_yaw_link', 'waist_roll_link', 'torso_link'],
+    pelvis: ['pelvis', 'waist_yaw_link', 'torso_link'],
+    loco: ['pelvis', 'waist_yaw_link', 'torso_link'],
+    all: ['pelvis', 'torso_link'],
+    other: ['pelvis', 'torso_link'],
+    left_arm: [
+        'left_wrist_yaw_link',
+        'left_wrist_roll_link',
+        'left_wrist_pitch_link',
+        'left_elbow_link',
+        'left_shoulder_roll_link',
+    ],
+    right_arm: [
+        'right_wrist_yaw_link',
+        'right_wrist_roll_link',
+        'right_wrist_pitch_link',
+        'right_elbow_link',
+        'right_shoulder_roll_link',
+    ],
+    left_hand: ['left_wrist_yaw_link', 'left_rubber_hand'],
+    right_hand: ['right_wrist_yaw_link', 'right_rubber_hand'],
+    left_manip: ['left_wrist_yaw_link', 'left_elbow_link'],
+    right_manip: ['right_wrist_yaw_link', 'right_elbow_link'],
+    arms: ['torso_link', 'pelvis'],
+    head: ['torso_link', 'pelvis'],
 };
 
 export function obsSizeForGroup(group) {
@@ -297,20 +327,21 @@ export function packGroupObservation(model, data, group, outcome, globalState) {
     const g = globalState;
     const home = group?.home || group?.defaultPose || null;
     const idx = group.indices || [];
+    const limb = limbImuForGroup(model, data, group);
 
     let k = 0;
     out[k++] = g.pelvis_z;
     out[k++] = g.head_z;
-    out[k++] = g.upright;
-    out[k++] = g.gx;
-    out[k++] = g.gy;
+    out[k++] = limb.upright;
+    out[k++] = limb.gx;
+    out[k++] = limb.gy;
     out[k++] = g.gz;
     out[k++] = g.vx;
     out[k++] = g.vy;
     out[k++] = g.vz;
     out[k++] = g.wx;
     out[k++] = g.wy;
-    out[k++] = g.wz;
+    out[k++] = limb.wz;
     out[k++] = g.fallen;
     out[k++] = g.success;
 
@@ -328,7 +359,6 @@ export function packGroupObservation(model, data, group, outcome, globalState) {
         out[k++] = Number(data.ctrl[idx[i] | 0]) || 0;
     }
 
-    const limb = limbImuForGroup(model, data, group);
     out[k++] = limb.upright;
     out[k++] = limb.gx;
     out[k++] = limb.gy;
@@ -341,7 +371,7 @@ export function packGroupObservation(model, data, group, outcome, globalState) {
     out[k++] = 0;
     out[k++] = 0;
     out[k++] = 0;
-    out[k++] = clamp11(g.wz);
+    out[k++] = clamp11(limb.wz);
     return out;
 }
 

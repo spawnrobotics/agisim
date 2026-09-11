@@ -1,4 +1,5 @@
 // rewards/duck/stand.js
+// Stand score in [0, 1]. Hard negative only when onFloor.
 
 import { clamp01, normalizeOutcome } from '../helpers.js';
 import { DUCK_REWARD_DEFAULTS, HEAD_JOINTS } from './defaults.js';

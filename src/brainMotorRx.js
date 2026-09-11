@@ -62,6 +62,10 @@ function clampCtrl(model, i, v) {
     return n;
 }
 
+/**
+ * Incoming brain motor packets. applyRx is the only gate that writes joints.
+ * Latest packet wins: apply immediately, never queue a clip.
+ */
 export function createBrainMotorRx({
     model,
     data,

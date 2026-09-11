@@ -1,6 +1,5 @@
-// mediaStreaming.js
 import workletUrl from './audio-processor.js?url';
-import CONFIG from './config.js';
+import CONFIG, { isStreamEnabled } from './config.js';
 
 export function createMediaStreaming({
     getHeadCam,
@@ -13,13 +12,16 @@ export function createMediaStreaming({
     auditoryIndex = 1,
     videoHeader = null,
     audioHeader = null,
-}) {
+} = {}) {
+    const visualAllowed = isStreamEnabled('visual');
+    const auditoryAllowed = isStreamEnabled('auditory');
+
     const visIdx = Math.max(1, Math.min(9, Math.floor(Number(visualIndex) || 1)));
     const audIdx = Math.max(1, Math.min(9, Math.floor(Number(auditoryIndex) || 1)));
     const VIDEO_HEADER = String(videoHeader || `VIS${visIdx}`).slice(0, 4);
     const AUDIO_HEADER = String(audioHeader || `AUD${audIdx}`).slice(0, 4);
 
-    let videoEnabled = true;
+    let videoEnabled = false;
     let audioEnabled = false;
     let streaming = false;
 
@@ -55,8 +57,16 @@ export function createMediaStreaming({
         return new TextEncoder().encode(s);
     }
 
-    // ── local mic ────────────────────────────────────────────
+    function canSendVideo() {
+        return visualAllowed && videoEnabled && streaming && isReady();
+    }
+
+    function canSendAudio() {
+        return auditoryAllowed && audioEnabled && streaming && isReady();
+    }
+
     async function ensureMic() {
+        if (!auditoryAllowed) return null;
         if (localStream?.getAudioTracks().some((t) => t.readyState === 'live')) {
             return localStream;
         }
@@ -93,7 +103,7 @@ export function createMediaStreaming({
     }
 
     async function setupAudioProcessing(restart = false) {
-        if (!localStream || !audioEnabled) return;
+        if (!auditoryAllowed || !localStream || !audioEnabled) return;
 
         if (!audioContext) {
             audioContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -120,7 +130,7 @@ export function createMediaStreaming({
 
         const minInterval = 1000 / 60;
         audioWorkletNode.port.onmessage = (event) => {
-            if (!streaming || !audioEnabled || !isReady()) return;
+            if (!canSendAudio()) return;
             const float32Data = event.data;
             if (!float32Data?.length) return;
 
@@ -141,10 +151,12 @@ export function createMediaStreaming({
 
     function startVideoLoop() {
         stopVideoLoop();
+        if (!visualAllowed) return;
+
         const interval = 1000 / Math.max(1, videoFps);
 
         videoTimer = setInterval(() => {
-            if (!streaming || !videoEnabled || !isReady()) return;
+            if (!canSendVideo()) return;
             const headCam = getHeadCam?.();
             if (!headCam?.grabRgbaFrame) return;
 
@@ -168,12 +180,15 @@ export function createMediaStreaming({
 
     function startStreaming() {
         if (streaming || !isReady()) return;
+        if (!visualAllowed && !auditoryAllowed) return;
         if (!videoEnabled && !audioEnabled) return;
         streaming = true;
-        if (videoEnabled) startVideoLoop();
-        if (audioEnabled) setupAudioProcessing().catch((err) => {
-            console.error('[Media] audio setup failed', err);
-        });
+        if (videoEnabled && visualAllowed) startVideoLoop();
+        if (audioEnabled && auditoryAllowed) {
+            setupAudioProcessing().catch((err) => {
+                console.error('[Media] audio setup failed', err);
+            });
+        }
         setStatus('Streaming active', '#60a5fa');
     }
 
@@ -189,22 +204,22 @@ export function createMediaStreaming({
     }
 
     function syncStreaming() {
-        const want = videoEnabled || audioEnabled;
+        const want = (visualAllowed && videoEnabled) || (auditoryAllowed && audioEnabled);
         if (want && !streaming && isReady()) startStreaming();
         else if (!want && streaming) stopStreaming();
-        else if (streaming && videoEnabled && !videoTimer) startVideoLoop();
+        else if (streaming && visualAllowed && videoEnabled && !videoTimer) startVideoLoop();
+        else if (streaming && !visualAllowed) stopVideoLoop();
     }
 
     async function setVideoEnabled(on) {
-        videoEnabled = !!on;
+        videoEnabled = visualAllowed && !!on;
+        if (!videoEnabled) stopVideoLoop();
         syncStreaming();
         return videoEnabled;
     }
 
     async function setAudioEnabled(on) {
-        const next = !!on;
-
-        if (!next) {
+        if (!auditoryAllowed || !on) {
             audioEnabled = false;
             if (gainNode) gainNode.gain.value = 0;
             releaseMic();
@@ -234,13 +249,12 @@ export function createMediaStreaming({
         return audioEnabled;
     }
 
-    // ── inbound VIDO / VIS1 ──────────────────────────────────
     function attachOverlayCanvas(canvas) {
         overlayCanvas = canvas;
     }
 
     function handleVideoBuffer(newVideoBuffer) {
-        if (!overlayCanvas || !newVideoBuffer?.data) return;
+        if (!visualAllowed || !overlayCanvas || !newVideoBuffer?.data) return;
 
         const ctx = overlayCanvas.getContext('2d');
         const size = newVideoBuffer.width || frameSize;
@@ -271,7 +285,6 @@ export function createMediaStreaming({
         playNext();
     }
 
-    // ── inbound AUDO / AUD1 ──────────────────────────────────
     function cleanupAudioPlayback(restoreMic) {
         if (currentAudioSource) {
             try { currentAudioSource.stop(0); } catch (_) { }
@@ -281,14 +294,14 @@ export function createMediaStreaming({
             clearTimeout(audioPlaybackTimeout);
             audioPlaybackTimeout = null;
         }
-        if (restoreMic && micWasOnBeforePlayback) {
+        if (restoreMic && micWasOnBeforePlayback && auditoryAllowed) {
             micWasOnBeforePlayback = false;
             setAudioEnabled(true);
         }
     }
 
     async function playAudioImmediately(float32Array) {
-        if (!float32Array || float32Array.length < 300) return;
+        if (!auditoryAllowed || !float32Array || float32Array.length < 300) return;
 
         if (currentAudioSource) {
             try { currentAudioSource.stop(0); } catch (_) { }

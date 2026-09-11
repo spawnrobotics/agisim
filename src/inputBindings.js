@@ -1,4 +1,3 @@
-// inputBindings.js
 export function bindFollowKeys(setFollow, resetCamera) {
     let following = true;
     setFollow(following);

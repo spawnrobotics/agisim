@@ -52,6 +52,10 @@ export function controlPeriod(model, inferHz) {
     };
 }
 
+/**
+ * Integrator that can either free-run from wall time or hold a control period
+ * (exactly `decimation` steps per action).
+ */
 export function createPhysicsClock({
     mujoco,
     model,

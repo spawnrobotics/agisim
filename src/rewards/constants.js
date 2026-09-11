@@ -1,4 +1,5 @@
 // rewards/constants.js
+/** Trailer after group-local planes + limb IMU. Slots stay zeroed. */
 export const MOTOR_OUTCOME_EXTRA = 3;
 
 export const STIM_NEAR_ZERO = 0.01;

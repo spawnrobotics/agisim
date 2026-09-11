@@ -1,4 +1,6 @@
 // rewards/duck/index.js
+// Mixer only. Backend owns motion. Frontend never writes ctrl here.
+// Negative only when onFloor. Stand/walk otherwise stay in [0, 1].
 
 import { clamp11 } from '../helpers.js';
 import {

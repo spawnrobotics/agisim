@@ -1,4 +1,3 @@
-// main.js
 import { loadRobotScene } from './loader.js';
 import { createRenderer } from './renderer.js';
 import { createUI } from './ui.js';
@@ -19,6 +18,7 @@ import CONFIG, {
     isDuckRobot,
     getStoredBrainId,
     setStoredBrainId,
+    isStreamEnabled,
 } from './config.js';
 import {
     spawnStanding,
@@ -165,6 +165,15 @@ async function boot() {
     const duck = typeof isDuckRobot === 'function'
         ? isDuckRobot(robot)
         : familyOf(robot).includes('duck');
+
+    const visualOn = typeof isStreamEnabled === 'function'
+        ? isStreamEnabled('visual')
+        : !!CONFIG.enableStreamVideo;
+    const auditoryOn = typeof isStreamEnabled === 'function'
+        ? isStreamEnabled('auditory')
+        : !!CONFIG.enableStreamAudio;
+    const visualCount = visualOn ? (CONFIG.visualCount ?? 1) : 0;
+    const auditoryCount = auditoryOn ? (CONFIG.auditoryCount ?? 1) : 0;
 
     setBoot(`Loading ${robot.name || robot.id}…`, 4);
 
@@ -321,8 +330,8 @@ async function boot() {
         motorGroups,
         actionSizes,
         obsSizes,
-        visualCount: CONFIG.visualCount ?? 1,
-        auditoryCount: CONFIG.auditoryCount ?? 1,
+        visualCount,
+        auditoryCount,
         applyRx: CONFIG.applyRx,
         onCtrlChanged: () => joints.syncFromData(),
         onStatus: (msg, color) => brainPanelRef.setStatus(msg, color),
@@ -335,6 +344,7 @@ async function boot() {
                 brainId: getStoredBrainId(),
                 applyRx: brainWS.isApplyRx?.(),
                 policyToBrain: CONFIG.policyToBrain,
+                streams: { visual: visualOn, auditory: auditoryOn },
                 motors: motorGroups.map((g) => `${g.header}:${g.id}:${g.actionSize}`),
                 serverMotors: msg?.motorCount,
             });
@@ -345,10 +355,14 @@ async function boot() {
             });
         },
         onVideoBuffer: (buf) => {
+            if (!visualOn) return;
             hud?.showBrainOverlay(true);
             media?.handleVideoBuffer(buf);
         },
-        onAudioBuffer: (samples) => media?.playAudioImmediately(samples),
+        onAudioBuffer: (samples) => {
+            if (!auditoryOn) return;
+            media?.playAudioImmediately(samples);
+        },
     });
     brainWSRef.current = brainWS;
 
@@ -380,7 +394,8 @@ async function boot() {
         getPreviewCanvas: () => headCam?.previewCanvas,
     });
 
-    await media.setVideoEnabled(true);
+    await media.setVideoEnabled(visualOn);
+    await media.setAudioEnabled(auditoryOn);
     hud.paintVideo?.(media.isVideoEnabled());
     hud.paintAudio?.(media.isAudioEnabled());
 
@@ -483,6 +498,7 @@ async function boot() {
         nq: model.nq,
         nu: model.nu,
         nbody: model.nbody,
+        streams: { visual: visualOn, auditory: auditoryOn },
         motors: motorGroups.map((g) => `${g.header}:${g.id}:${g.actionSize}`),
     });
 
@@ -491,8 +507,8 @@ async function boot() {
             walkUrl: p.walk,
             standUrl: p.stand,
             onProgress: (msg, pct) => console.log('[main] policy', msg, pct),
-        }).then(async (loaded) => {
-            if (loaded?.walk || loaded?.stand) {
+        }).then(async (loadedSessions) => {
+            if (loadedSessions?.walk || loadedSessions?.stand) {
                 await applyStandPolicy();
                 brainWS.releaseResetHold?.();
             }

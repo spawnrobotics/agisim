@@ -1,4 +1,6 @@
 // rewards/g1/stand.js
+// Heights + upright + body vel for HUD / policy infer only.
+// No stand/walk reward. Limb IMU is motorObs.js.
 
 import {
     quatUpDot,

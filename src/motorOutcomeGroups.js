@@ -1,10 +1,7 @@
 // motorOutcomeGroups.js
-
-export function isHipGroup(group) {
-    const id = String(group?.id || '');
-    const role = group?.role;
-    return role === 'hip' || id === 'left_hip' || id === 'right_hip';
-}
+// Outcome is metadata only: which group this packet belongs to.
+// No reward / advantage / pos-neg / hold-scale plant.
+// Per-group signal is the limb IMU slice in motorObs.js.
 
 export function isLegGroup(group) {
     const id = String(group?.id || '');
@@ -23,7 +20,6 @@ export function isLocoGroup(group) {
     const role = group?.role;
     return (
         role === 'loco' ||
-        isHipGroup(group) ||
         isLegGroup(group) ||
         isWaistGroup(group) ||
         id === 'loco' ||
@@ -56,6 +52,10 @@ export function isGazeGroup(group) {
     return role === 'gaze' || id === 'head';
 }
 
+/**
+ * Stamp slot / header / IMU body onto the shared outcome.
+ * Does not change reward fields — those are unused by motor cortex.
+ */
 export function outcomeForGroup(group, outcome = null) {
     const o = outcome && typeof outcome === 'object' ? outcome : {};
     if (!group) return o;

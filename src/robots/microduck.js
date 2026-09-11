@@ -1,3 +1,4 @@
+/** Official STAND2 / HOME_FRAME. Not model.qpos0. */
 export const MICRODUCK_STAND2 = Object.freeze([
     0.0,
     -0.0873,

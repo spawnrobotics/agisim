@@ -1,4 +1,4 @@
-// simLoop.js
+// simLoop.js — plant + IMU only. No reward / advantage.
 
 import { readStandHeights } from '../rewards/rewards.js';
 import { createRewardCurriculum } from '../rewards/curriculum.js';

@@ -1,17 +1,16 @@
 // motorGroups.js
 
-export const MOTOR_GROUP_MODE = 5;
+/** 1 = all, 2 = loco / arms, 3 = loco / L arm / R arm, 5+ = legs / waist / arms */
+export const MOTOR_GROUP_MODE = 3;
 
 export const DEFAULT_GROUP_IMU = {
-    left_hip: { body: 'left_hip_roll_link', site: null },
-    right_hip: { body: 'right_hip_roll_link', site: null },
-    left_leg: { body: 'left_knee_link', site: null },
-    right_leg: { body: 'right_knee_link', site: null },
-    waist: { body: 'torso_link', site: 'imu_in_torso' },
+    left_leg: { body: 'left_ankle_roll_link', site: null },
+    right_leg: { body: 'right_ankle_roll_link', site: null },
+    waist: { body: 'pelvis', site: 'imu_in_pelvis' },
     pelvis: { body: 'pelvis', site: 'imu_in_pelvis' },
-    loco: { body: 'torso_link', site: 'imu_in_torso' },
-    all: { body: 'torso_link', site: 'imu_in_torso' },
-    other: { body: 'torso_link', site: 'imu_in_torso' },
+    loco: { body: 'pelvis', site: 'imu_in_pelvis' },
+    all: { body: 'pelvis', site: 'imu_in_pelvis' },
+    other: { body: 'pelvis', site: 'imu_in_pelvis' },
     left_arm: { body: 'left_wrist_yaw_link', site: null },
     right_arm: { body: 'right_wrist_yaw_link', site: null },
     left_hand: { body: 'left_wrist_yaw_link', site: null },
@@ -19,7 +18,7 @@ export const DEFAULT_GROUP_IMU = {
     left_manip: { body: 'left_wrist_yaw_link', site: null },
     right_manip: { body: 'right_wrist_yaw_link', site: null },
     arms: { body: 'torso_link', site: 'imu_in_torso' },
-    head: { body: 'head_link', site: null },
+    head: { body: 'torso_link', site: 'head' },
 };
 
 function imuForId(id) {
@@ -46,16 +45,11 @@ function logGroupImu(groups) {
 
 const GROUP_DEFS = [
     {
-        id: 'left_hip',
-        match: [/^left_hip/i, /(^|_)l_hip/i, /left_.*hip/i],
-    },
-    {
-        id: 'right_hip',
-        match: [/^right_hip/i, /(^|_)r_hip/i, /right_.*hip/i],
-    },
-    {
         id: 'left_leg',
         match: [
+            /^left_hip/i,
+            /(^|_)l_hip/i,
+            /left_.*hip/i,
             /^left_(knee|ankle)/i,
             /(^|_)l_(knee|ankle)/i,
             /left_.*(knee|ankle)/i,
@@ -64,6 +58,9 @@ const GROUP_DEFS = [
     {
         id: 'right_leg',
         match: [
+            /^right_hip/i,
+            /(^|_)r_hip/i,
+            /right_.*hip/i,
             /^right_(knee|ankle)/i,
             /(^|_)r_(knee|ankle)/i,
             /right_.*(knee|ankle)/i,
@@ -102,12 +99,11 @@ const MANIP_IDS = new Set([
     'right_manip',
     'arms',
 ]);
-const HIP_IDS = new Set(['left_hip', 'right_hip']);
 const LEG_IDS = new Set(['left_leg', 'right_leg', 'loco']);
 const WAIST_IDS = new Set(['waist', 'loco', 'pelvis']);
 
 const LOCO_MERGE_IDS = new Set([
-    'left_hip', 'right_hip', 'left_leg', 'right_leg', 'waist', 'pelvis', 'other',
+    'left_leg', 'right_leg', 'waist', 'pelvis', 'other',
 ]);
 const LEFT_ARM_MERGE_IDS = new Set(['left_arm', 'left_hand', 'left_manip']);
 const RIGHT_ARM_MERGE_IDS = new Set(['right_arm', 'right_hand', 'right_manip']);
@@ -160,7 +156,6 @@ function roleFor(id) {
     if (id === 'arms' || ARM_IDS.has(id) || id === 'left_manip' || id === 'right_manip') {
         return 'manip';
     }
-    if (HIP_IDS.has(id)) return 'hip';
     if (LEG_IDS.has(id)) return 'leg';
     if (WAIST_IDS.has(id)) return 'waist';
     if (id === 'head') return 'gaze';
@@ -335,12 +330,12 @@ export function findGroupByRole(groups, role) {
     return (groups || []).find((g) => g.role === role) || null;
 }
 
-export function getHipGroups(groups) {
-    return (groups || []).filter((g) => g.role === 'hip' || HIP_IDS.has(g.id));
-}
-
 export function getLegGroups(groups) {
-    return (groups || []).filter((g) => g.role === 'leg' || g.id === 'left_leg' || g.id === 'right_leg');
+    return (groups || []).filter((g) =>
+        g.role === 'leg' ||
+        g.id === 'left_leg' ||
+        g.id === 'right_leg'
+    );
 }
 
 export function getLeftLegGroup(groups) {
@@ -395,6 +390,6 @@ export function assertGroupsCoverNu(groups, nu) {
     return { ok: true };
 }
 
-export { GROUP_DEFS, HAND_IDS, ARM_IDS, MANIP_IDS, LEG_IDS, HIP_IDS, WAIST_IDS };
+export { GROUP_DEFS, HAND_IDS, ARM_IDS, MANIP_IDS, LEG_IDS, WAIST_IDS };
 export const SINGLE_GROUP = MOTOR_GROUP_MODE <= 1;
 export default createMotorGroups;

@@ -3,6 +3,7 @@ import {
     getJoinPayload,
     getStoredBrainId,
     setStoredBrainId,
+    isStreamEnabled,
 } from './config.js';
 import CONFIG from './config.js';
 import { createBrainMotor } from './brainMotor.js';
@@ -51,6 +52,13 @@ function isAudioHeader(header) {
 
 function isMotorHeader(header) {
     return header === 'MOTO' || header === 'MOTR' || /^MOT[1-9]$/.test(header);
+}
+
+function headerKind(header) {
+    if (isVisualHeader(header)) return 'visual';
+    if (isAudioHeader(header)) return 'auditory';
+    if (isMotorHeader(header)) return 'motor';
+    return null;
 }
 
 function sameIntList(a, b) {
@@ -120,21 +128,27 @@ export function createBrainWS({
     let reconnectTimer = null;
     let intentionalClose = false;
 
-    const motorGroups = Array.isArray(groupsIn) && groupsIn.length
+    const motorOn = isStreamEnabled('motor');
+    const visualOn = isStreamEnabled('visual');
+    const auditoryOn = isStreamEnabled('auditory');
+
+    const motorGroups = motorOn && Array.isArray(groupsIn) && groupsIn.length
         ? groupsIn
-        : (typeof createMotorGroups === 'function' ? createMotorGroups(model) : []);
+        : (motorOn && typeof createMotorGroups === 'function' ? createMotorGroups(model) : []);
 
-    const actionSizes = Array.isArray(sizesIn) && sizesIn.length
+    const actionSizes = motorOn && Array.isArray(sizesIn) && sizesIn.length
         ? sizesIn.slice()
-        : (motorGroups.length ? motorGroups.map((g) => g.actionSize) : [model.nu]);
+        : (motorOn
+            ? (motorGroups.length ? motorGroups.map((g) => g.actionSize) : [model.nu])
+            : []);
 
-    const obsSizes = Array.isArray(obsIn) && obsIn.length
+    const obsSizes = motorOn && Array.isArray(obsIn) && obsIn.length
         ? obsIn.slice()
-        : getObsSizes(motorGroups);
+        : (motorOn ? getObsSizes(motorGroups) : []);
 
-    const motorCount = actionSizes.length;
-    const visualCount = visualCountIn ?? CONFIG.visualCount ?? 1;
-    const auditoryCount = auditoryCountIn ?? CONFIG.auditoryCount ?? 1;
+    const motorCount = motorOn ? actionSizes.length : 0;
+    const visualCount = visualOn ? (visualCountIn ?? CONFIG.visualCount ?? 1) : 0;
+    const auditoryCount = auditoryOn ? (auditoryCountIn ?? CONFIG.auditoryCount ?? 1) : 0;
     const primaryActionSize = actionSizes[0] ?? model.nu;
 
     function setStatus(msg, color) {
@@ -150,11 +164,20 @@ export function createBrainWS({
     }
 
     function sendWsJson(obj) {
-        if (isWsOpen()) ws.send(JSON.stringify(obj));
+        if (!isWsOpen()) return;
+        if (obj?.type === 'motor_outcome' && !motorOn) return;
+        if (obj?.type === 'motor-reset' && !motorOn) return;
+        ws.send(JSON.stringify(obj));
     }
 
     function sendWsBinary(buffer) {
-        if (isWsOpen()) ws.send(buffer);
+        if (!isWsOpen() || buffer == null) return;
+        const u8 = buffer instanceof Uint8Array
+            ? buffer
+            : new Uint8Array(buffer);
+        const kind = headerKind(readHeader(u8));
+        if (kind && !isStreamEnabled(kind)) return;
+        ws.send(buffer);
     }
 
     const motor = createBrainMotor({
@@ -168,7 +191,7 @@ export function createBrainWS({
     });
 
     function pushMotorOutcome(outcome, opts = {}) {
-        if (!outcome || typeof outcome !== 'object') return false;
+        if (!motorOn || !outcome || typeof outcome !== 'object') return false;
 
         const live = enrichOutcome(outcome);
         setLastMotorOutcome(live);
@@ -184,18 +207,14 @@ export function createBrainWS({
                 : (live.hold > 0.75 ? 0.0 : 0.02),
         } = opts;
 
-        if (json) {
-            sendWsJson(outcomeToJsonMessage(live));
-        }
+        if (json) sendWsJson(outcomeToJsonMessage(live));
 
         if (stim) {
             const payload = outcomeToStimPayload(live, {
                 minAbs: stimMinAbs,
                 source: live.source || 'mujoco_g1',
             });
-            if (payload) {
-                sendCortexStim(sendWsBinary, stimHeader, payload);
-            }
+            if (payload) sendCortexStim(sendWsBinary, stimHeader, payload);
         }
 
         return true;
@@ -229,7 +248,7 @@ export function createBrainWS({
         const live = standingResetOutcome();
         setLastMotorOutcome(live);
 
-        if (isReady()) {
+        if (isReady() && motorOn) {
             sendWsJson({
                 type: 'motor-reset',
                 reason: 'plant-reset',
@@ -261,12 +280,16 @@ export function createBrainWS({
     function releaseResetHold() {
         motor.releaseResetHold?.();
         motor.applyStandCtrl?.();
-        motor.setTxEnabled?.(true);
-        motor.setApplyRx?.(CONFIG.applyRx);
-        if (isReady()) motor.startLoop();
+        if (motorOn) {
+            motor.setTxEnabled?.(true);
+            motor.setApplyRx?.(CONFIG.applyRx);
+            if (isReady()) motor.startLoop();
+        }
     }
 
     function handleVideoPacket(uint8) {
+        if (!visualOn) return;
+
         if (uint8.length >= 8 && uint8[4] !== 2) {
             if (isVisualHeader(readHeader(uint8)) && uint8[4] !== 2) {
                 const payload = uint8.slice(4);
@@ -306,6 +329,7 @@ export function createBrainWS({
     }
 
     function handleAudioPacket(uint8) {
+        if (!auditoryOn) return;
         const payload = uint8.slice(4);
         if (payload.byteLength < 4 || payload.byteLength % 4 !== 0) return;
         const float32Array = new Float32Array(
@@ -326,6 +350,7 @@ export function createBrainWS({
                     if (msg.brainId) setStoredBrainId(msg.brainId);
 
                     if (
+                        motorOn &&
                         msg.actionSize != null &&
                         Number(msg.actionSize) !== primaryActionSize
                     ) {
@@ -336,6 +361,7 @@ export function createBrainWS({
                     }
 
                     if (
+                        motorOn &&
                         msg.motorCount != null &&
                         Number(msg.motorCount) !== motorCount
                     ) {
@@ -345,14 +371,14 @@ export function createBrainWS({
                         });
                     }
 
-                    if (Array.isArray(msg.actionSizes) && !sameIntList(msg.actionSizes, actionSizes)) {
+                    if (motorOn && Array.isArray(msg.actionSizes) && !sameIntList(msg.actionSizes, actionSizes)) {
                         console.warn('[BrainWS] actionSizes mismatch', {
                             server: msg.actionSizes,
                             local: actionSizes,
                         });
                     }
 
-                    if (Array.isArray(msg.obsSizes) && !sameIntList(msg.obsSizes, obsSizes)) {
+                    if (motorOn && Array.isArray(msg.obsSizes) && !sameIntList(msg.obsSizes, obsSizes)) {
                         console.warn('[BrainWS] obsSizes mismatch', {
                             server: msg.obsSizes,
                             local: obsSizes,
@@ -367,7 +393,7 @@ export function createBrainWS({
                     motor.setTxEnabled(false);
                     motor.stopAllPlayback?.();
                     motor.applyStandCtrl?.();
-                    motor.startLoop();
+                    if (motorOn) motor.startLoop();
                     onReady({
                         ...msg,
                         motorCount,
@@ -377,12 +403,21 @@ export function createBrainWS({
                         obsSizes,
                         applyRx: motor.isApplyRx(),
                         policyToBrain: CONFIG.policyToBrain,
+                        streams: {
+                            visual: visualOn,
+                            auditory: auditoryOn,
+                            motor: motorOn,
+                        },
                         headers: msg.headers || {
-                            visual: Array.from({ length: visualCount }, (_, i) => `VIS${i + 1}`),
-                            auditory: Array.from({ length: auditoryCount }, (_, i) => `AUD${i + 1}`),
-                            motor: motorGroups.length
-                                ? motorGroups.map((g) => g.header)
-                                : ['MOT1'],
+                            visual: visualOn
+                                ? Array.from({ length: visualCount }, (_, i) => `VIS${i + 1}`)
+                                : [],
+                            auditory: auditoryOn
+                                ? Array.from({ length: auditoryCount }, (_, i) => `AUD${i + 1}`)
+                                : [],
+                            motor: motorOn
+                                ? (motorGroups.length ? motorGroups.map((g) => g.header) : ['MOT1'])
+                                : [],
                         },
                     });
                 } else if (msg.type === 'error') {
@@ -407,6 +442,7 @@ export function createBrainWS({
                 return;
             }
             if (isMotorHeader(header)) {
+                if (!motorOn) return;
                 if (!motor.isResetHolding?.()) motor.handleRx(uint8);
             }
         }
@@ -459,13 +495,13 @@ export function createBrainWS({
             sendWsJson(
                 getJoinPayload({
                     brainId: getStoredBrainId(),
-                    actionSize: primaryActionSize,
-                    actionSizes,
-                    obsSizes,
+                    actionSize: motorOn ? primaryActionSize : undefined,
+                    actionSizes: motorOn ? actionSizes : undefined,
+                    obsSizes: motorOn ? obsSizes : undefined,
                     motorCount,
                     visualCount,
                     auditoryCount,
-                    frameSize: CONFIG.frameSize,
+                    frameSize: visualOn ? CONFIG.frameSize : undefined,
                 })
             );
         };
@@ -526,7 +562,7 @@ export function createBrainWS({
         isReady,
         sendWsJson,
         sendWsBinary,
-        sendZeroActionSequence: () => motor.sendZeroActionSequence(),
+        sendZeroActionSequence: () => motorOn && motor.sendZeroActionSequence(),
         sendResetPlant,
         resetMotorSeed,
         captureStandCtrl: () => motor.captureStandCtrl?.(),
@@ -544,18 +580,19 @@ export function createBrainWS({
         updateMotorOutcome: setLastMotorOutcome,
         setApplyRx: (v) => motor.setApplyRx(v),
         isApplyRx: () => motor.isApplyRx(),
-        setTxEnabled: (v) => motor.setTxEnabled(v),
+        setTxEnabled: (v) => motor.setTxEnabled(motorOn && v),
         isTxEnabled: () => motor.isTxEnabled(),
-        startLoop: () => motor.startLoop(),
+        startLoop: () => { if (motorOn) motor.startLoop(); },
         stopLoop: () => motor.stopLoop(),
-        startMotorLoop: () => motor.startLoop(),
+        startMotorLoop: () => { if (motorOn) motor.startLoop(); },
         handleRx: (u8) => {
+            if (!motorOn) return;
             if (!motor.isResetHolding?.()) motor.handleRx(u8);
         },
         notePolicyAction: (act) => motor.notePolicyAction(act),
         stopAllPlayback: () => motor.stopAllPlayback(),
         syncActorFromHandoff: () => {
-            if (motor.isResetHolding?.()) {
+            if (!motorOn || motor.isResetHolding?.()) {
                 motor.setApplyRx(false);
                 motor.setTxEnabled(false);
                 return;

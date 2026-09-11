@@ -19,9 +19,9 @@ export function createUI({
     const panel = document.createElement('div');
     panel.id = 'control-panel';
     panel.innerHTML = `
-      <button id="ctrl-pause" class="ctrl-icon" type="button" title="Pause"></button>
-      <button id="ctrl-reset" class="ctrl-icon" type="button" title="Reset to stand"></button>
+      <button id="ctrl-pause" class="ctrl-icon" style="display: none" type="button" title="Pause"></button>
       <button id="ctrl-joints" class="ctrl-icon" type="button" title="Joint controls"></button>
+      <button id="ctrl-reset" class="ctrl-icon" type="button" title="Reset to stand"></button>
       <button id="ctrl-robot" class="ctrl-icon ctrl-robot" style="display: none" type="button" title="Switch robot"></button>
       <div class="status" id="ctrl-status"></div>
     `;

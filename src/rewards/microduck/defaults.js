@@ -1,4 +1,4 @@
-// rewards/duck/defaults.js
+// rewards/duck/defaults.js — stand floors match MICRODUCK_ROBOT.stand
 export const HEAD_JOINTS = ['neck_pitch', 'head_pitch', 'head_yaw', 'head_roll'];
 
 export const DUCK_REWARD_DEFAULTS = {
